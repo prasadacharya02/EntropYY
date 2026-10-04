@@ -1,8 +1,9 @@
-# Minimal dependencies for CI / non-optional test suite
-# Guaranteed to install in offline/restricted environments
+# Core + test dependencies. DQN, Web3, and SHAP stay optional; the rule/risk
+# path and its RF comparison tests use this pinned scikit-learn build.
 watchdog==4.0.1
 psutil==5.9.8
 numpy==1.26.4
+scikit-learn==1.4.2
 flask==3.0.2
 flask-socketio==5.3.6
 python-dotenv==1.0.1

@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import secrets
+import threading
 from datetime import datetime
 from pathlib import Path
 from functools import wraps
@@ -33,8 +34,31 @@ VAULT_PIN = str(getattr(config, "VAULT_PIN", "1234"))
 VAULT_SESSION_SECONDS = int(getattr(config, "VAULT_SESSION_HOURS", 8)) * 3600
 
 
+_LOGIN_STATE: dict[str, dict] = {}
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_MAX_FAILURES = 5
+_LOGIN_LOCKOUT_SECONDS = 300
+
+
 def _vault_unlocked() -> bool:
-    return True  # Kept unlocked for smooth lab demo
+    expires = session.get("vault_expires_at")
+    if not session.get("vault_user") or not expires:
+        return False
+    try:
+        if float(expires) <= time.time():
+            session.pop("vault_user", None)
+            session.pop("vault_expires_at", None)
+            return False
+    except (TypeError, ValueError):
+        session.clear()
+        return False
+    return True
+
+
+def _vault_required():
+    if not _vault_unlocked():
+        return jsonify({"error": "vault locked; authenticate first"}), 401
+    return None
 
 
 def _get_real_folder_path(folder_name: str) -> str | None:
@@ -121,19 +145,42 @@ def health():
 def vault_status():
     return jsonify({
         "unlocked": _vault_unlocked(),
-        "user": session.get("vault_user") or VAULT_USER,
-        "privileged": True,
+        "user": session.get("vault_user") if session.get("vault_user") else None,
+        "privileged": _vault_unlocked(),
         "scope": "quarantine_only",
     })
 
 
 @app.route("/api/vault/login", methods=["POST"])
 def vault_login():
+    data = request.get_json(silent=True) or {}
+    supplied = str(data.get("pin") or "")
+    address = request.remote_addr or "unknown"
+    now = time.time()
+    with _LOGIN_LOCK:
+        state = _LOGIN_STATE.get(address, {"failures": 0, "locked_until": 0.0})
+        if state.get("locked_until", 0.0) > now:
+            return jsonify({"ok": False, "error": "too many attempts; try again later"}), 429
+
+    if not secrets.compare_digest(supplied, VAULT_PIN):
+        with _LOGIN_LOCK:
+            state = _LOGIN_STATE.setdefault(address, {"failures": 0, "locked_until": 0.0})
+            state["failures"] = int(state.get("failures", 0)) + 1
+            if state["failures"] >= _LOGIN_MAX_FAILURES:
+                state["locked_until"] = now + _LOGIN_LOCKOUT_SECONDS
+        return jsonify({"ok": False, "error": "invalid PIN"}), 403
+
+    with _LOGIN_LOCK:
+        _LOGIN_STATE.pop(address, None)
+    session.clear()
+    session["vault_user"] = VAULT_USER
+    session["vault_expires_at"] = now + max(60, VAULT_SESSION_SECONDS)
+    session.permanent = True
     return jsonify({
         "ok": True,
         "message": "Privileged access granted",
         "user": VAULT_USER,
-        "expires_in": VAULT_SESSION_SECONDS,
+        "expires_in": max(60, VAULT_SESSION_SECONDS),
     })
 
 
@@ -149,12 +196,16 @@ def get_folders():
     for folder_name in ("Documents", "Downloads", "Desktop", "Pictures", "Quarantine"):
         folder_path = _get_real_folder_path(folder_name)
         is_q = (folder_name == "Quarantine")
-        files, size = get_folder_stats(folder_path, is_q)
+        unlocked = _vault_unlocked()
+        if is_q and not unlocked:
+            files, size = 0, 0
+        else:
+            files, size = get_folder_stats(folder_path, is_q)
         folders.append({
             "name": folder_name,
             "file_count": files,
             "size": format_size(size),
-            "locked": False,
+            "locked": bool(is_q and not unlocked),
         })
     return jsonify(folders)
 
@@ -187,17 +238,17 @@ def _quarantine_entry(filename: str) -> dict | None:
     return {
         "name": filename,
         "original_name": original_name,
-        "from_folder": from_folder if original else "Documents",
+        "from_folder": from_folder if original else "unknown",
         "quarantined_at": quarantined_at.replace("T", " ")[:19],
         "size": format_size(st.st_size),
         "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
         "extension": os.path.splitext(filename)[1].lower(),
         "icon": get_file_icon(original_name),
-        "fingerprint": (meta.get("fingerprint") or "a3b9f8d1e2c45678")[:16],
-        "entropy": meta.get("entropy") or 7.95,
-        "process_killed": True,
-        "killed_pid": killed.get("pid") or 25576,
-        "killed_name": killed.get("name") or "ransomware_ryuk.exe",
+        "fingerprint": str(meta.get("fingerprint"))[:16] if meta.get("fingerprint") else None,
+        "entropy": meta.get("entropy"),
+        "process_killed": bool(killed.get("terminated")),
+        "killed_pid": killed.get("pid"),
+        "killed_name": killed.get("name"),
         "writer_pid": proc.get("pid"),
         "writer_name": proc.get("name"),
         "read_only": True,
@@ -207,6 +258,9 @@ def _quarantine_entry(filename: str) -> dict | None:
 
 @app.route("/api/quarantine")
 def quarantine_listing():
+    unauthorized = _vault_required()
+    if unauthorized:
+        return unauthorized
     entries = []
     if os.path.isdir(QUARANTINE_FILES):
         for filename in os.listdir(QUARANTINE_FILES):
@@ -214,17 +268,23 @@ def quarantine_listing():
             if entry:
                 entries.append(entry)
     entries.sort(key=lambda e: e.pop("_sort"), reverse=True)
-    killed = sorted({(e["killed_pid"], e["killed_name"]) for e in entries if e["process_killed"] and e["killed_pid"]}, key=lambda k: k[0] or 0)
+    killed = sorted({(e["killed_pid"], e["killed_name"]) for e in entries
+                     if e["process_killed"] and e["killed_pid"]},
+                    key=lambda k: k[0] or 0)
     return jsonify({
         "vault_path": QUARANTINE_FILES,
         "count": len(entries),
-        "processes_killed": [{"pid": p, "name": n} for p, n in killed] if killed else [{"pid": 25576, "name": "ransomware_ryuk.exe"}],
+        "processes_killed": [{"pid": p, "name": n} for p, n in killed],
         "files": entries,
     })
 
 
 @app.route("/api/files/<folder>")
 def get_files(folder):
+    if folder == "Quarantine":
+        unauthorized = _vault_required()
+        if unauthorized:
+            return unauthorized
     if folder not in ALLOWED_FOLDERS:
         return jsonify([])
 
@@ -287,15 +347,19 @@ def status():
         "encrypted_files": total_encrypted,
         "quarantined_files": quarantined,
         "ransom_notes": total_notes,
-        "system_status": "PROTECTED" if quarantined > 0 else "OPERATIONAL",
+        "system_status": "COMPROMISED" if total_encrypted > 0 else "OPERATIONAL",
         "detected_family": detected_family,
         "compromise_pct": round((total_encrypted / max(total_files, 1)) * 100, 1),
-        "vault_unlocked": True,
+        "vault_unlocked": _vault_unlocked(),
     })
 
 
 @app.route("/api/file/<folder>/<filename>")
 def preview_file(folder, filename):
+    if folder == "Quarantine":
+        unauthorized = _vault_required()
+        if unauthorized:
+            return unauthorized
     file_path = _safe_file_path(folder, filename)
     if file_path is None or not file_path.is_file():
         return jsonify({"error": "file not found"}), 404
@@ -308,9 +372,10 @@ def preview_file(folder, filename):
             f"Original file   : {entry.get('original_name')}",
             f"Quarantined at  : {entry.get('quarantined_at')}",
             f"Entropy         : {entry.get('entropy')}",
-            f"Process killed  : PID {entry.get('killed_pid')} ({entry.get('killed_name')})",
+            (f"Process killed  : PID {entry.get('killed_pid')} ({entry.get('killed_name')})"
+             if entry.get("process_killed") else "Process killed  : no verified termination recorded"),
             "",
-            "The clean copy was restored to the original folder from the backup vault."
+            "Recovery outcome: see the SOC event record; restoration is not assumed."
         ]
         return jsonify({"name": filename, "preview_type": "quarantine", "content": "\n".join(lines), "record": entry})
 

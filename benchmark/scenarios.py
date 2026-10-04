@@ -11,6 +11,10 @@
 # ============================================================
 
 import random
+import io
+import struct
+import zlib
+import zipfile
 from dataclasses import dataclass, field
 
 
@@ -81,6 +85,36 @@ DISGUISE_EXTS = [".locked", ".encrypted", ".crypt", ".wnaCry", ".paid",
                  ".winlock", ".data.lock"]
 _OFFICE_EXTS = [".txt", ".docx", ".xlsx", ".pdf"]
 PAYLOAD = 65536
+
+
+def synthetic_png(rng: random.Random, size_kb: int = 64) -> bytes:
+    """Build a structurally framed PNG with deterministic high-entropy pixels."""
+    width = 128
+    height = max(1, (size_kb * 1024) // (width * 3))
+    height = min(height, 4096)
+    raw = b"".join(b"\x00" + rng.randbytes(width * 3) for _ in range(height))
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw, level=1)) + chunk(b"IEND", b""))
+
+
+def synthetic_zip(rng: random.Random, size: int = PAYLOAD) -> bytes:
+    """Create a real ZIP container without extracting or executing content."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("payload.bin", rng.randbytes(size))
+    return output.getvalue()
+
+
+def synthetic_mp4(rng: random.Random, size: int = PAYLOAD * 2) -> bytes:
+    """Minimal ftyp-framed synthetic video stream for format-check tests."""
+    ftyp = struct.pack(">I", 24) + b"ftyp" + b"isom" + struct.pack(">I", 0x200) + b"isomiso2"
+    return ftyp + rng.randbytes(max(0, size - len(ftyp)))
 
 
 def _estate(rng: random.Random, n_files: int,
@@ -185,14 +219,14 @@ def attack_silent_unknown_ext(seed: int) -> Scenario:
 
 
 def attack_image_blindspot(seed: int) -> Scenario:
-    """Slow, in-place encryption of .jpg files: entropy stays within
-    the normal image range (7.0-7.8 + 0.5 margin), no rename, no
-    speed. The original images are ALSO ~8.0, so there is no delta.
+    """Slow, in-place encryption of structurally valid .png files: entropy stays
+    within the normal image range, no rename, no speed, and no useful
+    entropy delta.
     This is a documented blind spot of entropy-only detection in BOTH
     baseline modes: the encrypted payload is indistinguishable from
     native compressed content."""
     rng = random.Random(seed)
-    estate = [(f"Photos/pic_{i:02d}.jpg", random_bytes(rng, PAYLOAD))
+    estate = [(f"Photos/pic_{i:02d}.png", synthetic_png(rng, PAYLOAD // 1024))
               for i in range(4)]
     ops = []
     for rel, _content in estate:
@@ -213,7 +247,7 @@ def attack_note_dropper(seed: int) -> Scenario:
     rng = random.Random(seed)
     estate = [
         ("Documents/report.docx", text_bytes(rng, 2048)),
-        ("Photos/pic_00.jpg", random_bytes(rng, PAYLOAD)),
+        ("Photos/pic_00.png", synthetic_png(rng, PAYLOAD // 1024)),
     ]
     ops = [
         Op("create", "Documents/Restore-My-Files.txt",
@@ -287,7 +321,7 @@ def workload_archive_creation(seed: int) -> Scenario:
     ops = []
     for i in range(5):
         rel = f"Archives/backup_{i:02d}.zip"
-        ops.append(Op("create", rel, random_bytes(rng, PAYLOAD),
+        ops.append(Op("create", rel, synthetic_zip(rng, PAYLOAD),
                       delay_before=1.0))
     return Scenario(
         "archive_creation", "legitimate",
@@ -301,8 +335,8 @@ def workload_photo_import(seed: int) -> Scenario:
     rng = random.Random(seed)
     ops = []
     for i in range(5):
-        rel = f"Photos/photo_{i:02d}.jpg"
-        ops.append(Op("create", rel, random_bytes(rng, PAYLOAD),
+        rel = f"Photos/photo_{i:02d}.png"
+        ops.append(Op("create", rel, synthetic_png(rng, PAYLOAD // 1024),
                       delay_before=0.5))
     return Scenario(
         "photo_import", "legitimate",
@@ -316,7 +350,7 @@ def workload_video_write(seed: int) -> Scenario:
     ops = []
     for i in range(2):
         rel = f"Videos/clip_{i}.mp4"
-        ops.append(Op("create", rel, random_bytes(rng, PAYLOAD * 2),
+        ops.append(Op("create", rel, synthetic_mp4(rng, PAYLOAD * 2),
                       delay_before=0.2))
     return Scenario(
         "video_write", "legitimate",

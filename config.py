@@ -133,6 +133,9 @@ CAMPAIGN_ENABLED        = _env_bool("ENTROPY_CAMPAIGN_ENABLED", True)
 CAMPAIGN_WINDOW_SECONDS = _env_float("ENTROPY_CAMPAIGN_WINDOW_SECONDS", 15.0, minimum=1.0)
 CAMPAIGN_MIN_FILES      = _env_int("ENTROPY_CAMPAIGN_MIN_FILES", 2, minimum=2)
 SAMPLE_SIZE_BYTES       = _env_int("ENTROPY_SAMPLE_SIZE_BYTES", 65536, minimum=1)
+# Exact content hashes are computed incrementally up to this limit; larger
+# files retain the sampled entropy hash but are not shared as exact intel.
+CONTENT_HASH_MAX_BYTES  = _env_int("ENTROPY_CONTENT_HASH_MAX_BYTES", 268435456, minimum=0)
 
 AI_ENGINE = os.getenv("ENTROPY_AI_ENGINE", "auto").strip().lower()
 BACKUP_MAX_VERSIONS_PER_FILE = _env_int("ENTROPY_BACKUP_MAX_VERSIONS", 10, minimum=1)

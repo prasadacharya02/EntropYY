@@ -32,8 +32,12 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 config._env_float("TEST_FLOAT", 1.0, minimum=0.0)
 
-    def test_default_watch_folder_is_confined_to_test_data(self):
-        self.assertEqual(config.WATCH_FOLDERS, [config.TESTING_DATA_DIR])
+    def test_watch_scope_always_includes_the_synthetic_victim_estate(self):
+        # Extra operator watch roots may be configured, but lab startup must
+        # not silently omit the folder used by its controlled demo.
+        self.assertIn(config.VICTIM_USER_FILES, config.WATCH_FOLDERS)
+        self.assertTrue(all(Path(folder).is_absolute()
+                            for folder in config.WATCH_FOLDERS))
 
 
 if __name__ == "__main__":

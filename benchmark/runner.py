@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 from blockchain.fingerprint_exchange import FingerprintExchange
 from entropy.entropy_calculator import EntropyAnalyzer
+from detection.structure import inspect_structure
 from monitoring.defense_guard import collect_threat_flags
 from monitoring.pipeline_runner import DecisionEngine  # noqa: F401
 from benchmark.scenarios import ATTACKS, WORKLOADS
@@ -142,13 +143,22 @@ def simulate_scenario(scenario, *, baseline: bool, root: Path,
         clock.record()
         rate = round(clock.rate(), 2)
 
+        structure = inspect_structure(
+            str(target), original_path=str(old_path) if op.kind == "rename" else None
+        )
         event = {
             "event_id": f"bench-{scenario.name}-{i}",
             "timestamp": datetime.now().isoformat(),
             "event_type": event_type,
             "file_path": str(target),
+            "original_path": str(old_path) if op.kind == "rename" else None,
             "file_extension": result.get("file_extension", ""),
+            "file_size": result.get("file_size", 0),
             "file_hash": result.get("file_hash", ""),
+            "content_hash": result.get("content_hash"),
+            "structure": structure,
+            "structure_anomaly": bool(structure.get("anomaly")),
+            "events_in_window": len(clock._events),
             "entropy_overall": result.get("entropy_overall", 0.0),
             "entropy_delta": result.get("entropy_delta", 0.0),
             "threat_score": result.get("threat_score", 0.0),
@@ -380,7 +390,7 @@ def write_markdown(summary: dict, out_path: Path) -> Path:
         "polymorphic": "randomized order, extensions, timing",
         "baseline_first": "clean edit then encryption (delta)",
         "silent_unknown_ext": "no prior history, unknown exts",
-        "image_blindspot": "in-range entropy, no rename — see blind spots",
+        "image_blindspot": "in-range entropy, no rename — caught by format-integrity",
         "note_dropper": "ransom note is the only signal (blind-spot payload)",
         "backup_tamper": "backup store deleted — defense tamper signal",
     }
@@ -405,43 +415,71 @@ def write_markdown(summary: dict, out_path: Path) -> Path:
         add("## Known blind spots (honest limitations)")
         add("")
         for name in summary["known_blind_spots"]:
-            add(f"- `{name}`: 0% detection in this battery. In-place "
-                f"encryption of already-high-entropy media (images, video) "
-                f"without a rename leaves entropy within the file type's "
-                f"normal range — the encrypted payload is indistinguishable "
-                f"from native compressed content by entropy alone. "
-                f"Candidates for future signals: magic-byte validation, "
-                f"partial-encryption (front) detection, and size anomalies.")
+            add(f"- `{name}`: 0% detection in this battery.")
         add("")
+    add("## Residual detection limitation (not measured away)")
+    add("")
+    add("The `image_blindspot` scenario is now caught by the format-integrity "
+        "signal: a full-file rewrite of a `.png` breaks its chunk framing "
+        "even when payload entropy stays inside the image range. This is a "
+        "*structural* signal, not an entropy one.")
+    add("")
+    add("It has a known boundary that this battery does **not** exercise: an "
+        "attacker who encrypts payload bytes while preserving valid container "
+        "framing (for example re-emitting well-formed chunks over encrypted "
+        "data) leaves the format check satisfied. That variant is untested "
+        "here and must not be reported as detected.")
+    add("")
     fx = summary.get("federated_exchange")
     if fx and "error" not in fx:
-        add("## Federated exchange (multi-node simulation)")
+        add("## Cross-host intelligence (local shared registry)")
         add("")
-        add("Four simulated tenants share one threat-fingerprint registry "
-            "and drive the real decision + response chain. A fingerprint "
-            f"contained by >= {fx.get('confirm_threshold', 2)} independent "
-            "nodes auto-confirms; a single node's sighting only "
-            "corroborates and can never quarantine alone (the poison-node "
-            "defence).")
+        add("Several simulated hosts share one local registry and drive the real "
+            "decision + response chain. The registry is a shared SQLite file in "
+            "this repository, **not** a network. Every host encrypts with its "
+            "own randomised ciphertext, so this measures what actually "
+            "generalises across victims.")
         add("")
-        add("| Metric | Value |")
-        add("| --- | --- |")
-        add(f"| Known-threat recall at first sight "
-            f"(confirmed, auto-quarantine) | "
-            f"**{fx['known_threat_recall_first_sight']}** "
-            f"({fx['known_threat_recall_pct']}%) |")
-        add(f"| Single-sighting restraint "
-            f"(recognised, NOT over-quarantined) | "
-            f"{fx['single_sighting_restraint']} "
-            f"({fx['single_sighting_restraint_pct']}%) |")
-        add(f"| Workload false positives "
-            f"(legitimate files alerted) | "
-            f"{fx['workload_false_positives']}/{fx['workload_runs']} |")
+        add("| Channel | Metric | Value |")
+        add("| --- | --- | --- |")
+        add(f"| Exact content hash | Cross-host matches for randomised "
+            f"ciphertext | **{fx.get('exact_hash_cross_node_matches', 0)}** |")
+        add(f"| Exact content hash | Known-threat recall at first sight "
+            f"(content-hash keyed) | "
+            f"**{fx.get('known_threat_recall_first_sight', 'n/a')}** |")
+        sep = fx.get("behavioral_separation") or {}
+        add(f"| Behavioural fingerprint | Same strain, other host, different "
+            f"ciphertext (Hamming) | "
+            f"**{sep.get('strain_vs_other_host_same_strain', 'n/a')}** |")
+        add(f"| Behavioural fingerprint | Second-host encounter (Hamming) | "
+            f"**{sep.get('strain_vs_second_host_encounter', 'n/a')}** |")
+        add(f"| Behavioural fingerprint | Legitimate backup workload "
+            f"(Hamming) | **{sep.get('strain_vs_legitimate_backup_workload', 'n/a')}** |")
+        add(f"| Behavioural fingerprint | Match threshold | "
+            f"{sep.get('max_match_distance', 'n/a')} bits |")
+        add(f"| Behavioural fingerprint | Independent nodes corroborating | "
+            f"{len(fx.get('warm_start_cluster_sources') or [])} |")
+        add(f"| Workload | Legitimate files alerted | "
+            f"{fx.get('workload_false_positives', 0)}/"
+            f"{fx.get('workload_runs', 0)} |")
         add("")
-        add("Headline: a fresh node with zero local history quarantined a "
-            "locally-ambiguous file (score 40, alert-only) purely on "
-            "cross-node memory. Run "
-            "`python -m benchmark.exchange_simulation`; see "
+        add("Interpretation, stated conservatively:")
+        add("")
+        add("- An exact content hash **cannot** identify a shared ransomware "
+            "strain across hosts: each victim's ciphertext is randomised, so "
+            "the cross-host match count is zero. The one artefact that does "
+            "match is the ransom note, which is byte-identical by design.")
+        add("- The behavioural fingerprint **does** correlate the same strain "
+            "across hosts even when the ciphertext bytes are completely "
+            "different, and stays well separated from a legitimate bulk "
+            "backup workload. A match is corroborating evidence only; it can "
+            "raise review priority but never quarantines a file by itself.")
+        add("- A single-file session is **not** matchable: the cold-start and "
+            "single-sighting probes hold one file each, and one event has no "
+            "behavioural shape. This is a real limit of the method, not a "
+            "tuning parameter.")
+        add("")
+        add("Run `python -m benchmark.exchange_simulation`; see "
             "`docs/federated-exchange.md`.")
         add("")
     add("## Recovery drill (detect → contain → recover)")
@@ -618,8 +656,12 @@ def main(argv=None) -> int:
     sim_dir = Path(tempfile.mkdtemp(prefix="exchange_bench_"))
     try:
         sim = run_simulation(base_dir=str(sim_dir))
+        headline = sim.get("headline", {})
+        channel = headline.get("behavioural_channel", {})
         summary["federated_exchange"] = sim["recall_metrics"] | {
             "confirm_threshold": sim["confirm_threshold"],
+            "behavioral_separation": channel.get("separation"),
+            "warm_start_cluster_sources": channel.get("cluster_sources"),
         }
     except Exception as exc:  # the detection battery still publishes
         summary["federated_exchange"] = {"error": str(exc)}

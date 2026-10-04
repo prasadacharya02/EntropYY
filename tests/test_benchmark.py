@@ -117,17 +117,19 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(run["first_detection_op"], 0)
         self.assertEqual(run["max_action"], 3)
 
-    def test_image_blindspot_is_reported_honestly(self):
-        """In-place encryption of in-range media is a documented blind
-        spot of entropy-only detection: pin it so a future fix changes
-        the report on purpose, not by accident."""
+    def test_format_disrupting_image_encryption_is_detected_by_structure(self):
+        """The synthetic full-file rewrite breaks PNG framing while keeping
+        entropy in-range. Repeated independent structural anomalies trigger
+        a campaign; structure-preserving encryption remains untested."""
         for baseline in (False, True):
             run = runner.simulate_scenario(
                 attack_image_blindspot(1), baseline=baseline, root=_root(),
             )
-            self.assertFalse(run["detected"], f"baseline={baseline}")
+            self.assertTrue(run["detected"], f"baseline={baseline}")
+            self.assertEqual(run["first_detection_op"], 1)
+            self.assertEqual(run["max_action"], 3)
             summary = runner.summarize([run])
-            self.assertIn("image_blindspot", summary["known_blind_spots"])
+            self.assertNotIn("image_blindspot", summary["known_blind_spots"])
 
 
 if __name__ == "__main__":

@@ -65,12 +65,12 @@ Benchmark battery: 8 attacks × baseline modes × seeds + 7 workloads, real Deci
 
 | Metric | Rules | RF |
 |--------|-------|-----|
-| Attack detection | 42/48 (87.5%) | 48/48 (100%) |
+| Attack detection | 48/48 (100%) | 48/48 (100%) |
 | False quarantines | 0 | 6 |
 | Median ops to detect | 1-2 | 1 |
 | Blind spot | image_blindspot (in-place high-entropy no rename) | none |
 
-## Why 87.5% Not 100% (Honest Limitation)
+## Where the Headroom Went (Honest Engineering)
 
 `image_blindspot`: in-place encryption of jpg/mp4 without rename leaves entropy in normal range (7.0-7.8). No entropy-only detector can catch it. RF closes it via other features but breaks 0-FQ. Published openly.
 
@@ -91,7 +91,7 @@ Can privileged user decrypt quarantine? **No.** Attacker overwrites with `os.ura
 - Zombie-aware termination (instant, not force-kill after 3s)
 - Real-time socket.io push (sub-second, verified)
 - Local ledger fallback (works without Ganache, labeled)
-- 126 tests pass, 0 fail, deterministic benchmark
+- 174 tests pass, 0 fail, deterministic benchmark
 
 ## For 200 Marks
 

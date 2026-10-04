@@ -114,7 +114,7 @@
         <button class="tool disabled">Rename</button>
         <button class="tool" onclick="refreshAll()">Refresh</button>
         <button class="tool" onclick="showHome()">This PC</button>
-        <button class="tool lock-btn" id="vaultBtn" onclick="handleVaultBtn()">🔓 Lock Vault</button>
+        <button class="tool lock-btn" id="vaultBtn" onclick="handleVaultBtn()">🔒 Open Vault</button>
       </div>
       <div class="pathbar">
         <button class="navbtn" onclick="showHome()" title="Up">↑</button>
@@ -195,8 +195,27 @@
     return res.json();
   }
 
-  function handleVaultBtn() {
+  async function handleVaultBtn() {
+    try {
+      const status = await fetchJSON("/api/vault/status");
+      if (status.unlocked) {
+        await fetch("/api/vault/logout", { method: "POST" });
+        if (currentFolder === "Quarantine") await showHome();
+        await updateVaultStatus();
+        return;
+      }
+    } catch {}
     openFolder('Quarantine');
+  }
+
+  async function updateVaultStatus() {
+    try {
+      const status = await fetchJSON("/api/vault/status");
+      const btn = document.getElementById("vaultBtn");
+      const tag = document.getElementById("vaultTag");
+      if (btn) btn.textContent = status.unlocked ? "🔓 Lock Vault" : "🔒 Open Vault";
+      if (tag) tag.textContent = status.unlocked ? "🔓" : "🔒";
+    } catch {}
   }
 
   function setNeutralStatus(text) {
@@ -222,6 +241,7 @@
 
     try { folderCache = await fetchJSON("/api/folders"); }
     catch { folderCache = []; }
+    await updateVaultStatus();
 
     const totalFiles = folderCache.filter(f => f.name !== "Quarantine").reduce((a, f) => a + (f.file_count || 0), 0);
 
@@ -257,10 +277,30 @@
     document.getElementById("searchBox").value = "";
 
     try {
-      const res = await fetch("/api/files/" + encodeURIComponent(name));
-      fileCache = await res.json();
-      if (!Array.isArray(fileCache)) fileCache = fileCache.files || [];
-    } catch { fileCache = []; }
+      const url = "/api/files/" + encodeURIComponent(name);
+      let res = await fetch(url);
+      if (res.status === 401 && name === "Quarantine") {
+        const pin = window.prompt("Quarantine vault is locked. Enter the vault PIN:");
+        if (pin === null) { currentFolder = null; await showHome(); return; }
+        const login = await fetch("/api/vault/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin })
+        });
+        if (!login.ok) {
+          const error = await login.json().catch(() => ({}));
+          window.alert(error.error || "Vault authentication failed.");
+          currentFolder = null; await showHome(); return;
+        }
+        await updateVaultStatus();
+        res = await fetch(url);
+      }
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || "Unable to load folder");
+      fileCache = Array.isArray(payload) ? payload : (payload.files || []);
+    } catch (error) {
+      fileCache = [];
+      if (name === "Quarantine" && error?.message) window.alert(error.message);
+    }
 
     renderFiles(fileCache);
     await refreshStatus();
@@ -279,27 +319,29 @@
 
   function renderQuarantine(files) {
     const killed = {};
-    files.forEach(f => { if (f.process_killed && f.killed_pid) killed[f.killed_pid] = f.killed_name; });
+    files.forEach(f => {
+      if (f.process_killed && f.killed_pid) killed[f.killed_pid] = f.killed_name || "unknown";
+    });
     const killedTxt = Object.keys(killed).length
-      ? Object.entries(killed).map(([pid, n]) => `PID ${pid} (${escapeHtml(n || "ransomware.exe")})`).join(", ")
-      : "PID 25576 (ransomware_ryuk.exe)";
-      
-    const rows = files.map(f => `
-      <tr onclick="previewFile('Quarantine', \`${f.name.replace(/`/g, "")}\`)">
+      ? Object.entries(killed).map(([pid, name]) => `PID ${pid} (${escapeHtml(name)})`).join(", ")
+      : "No verified process termination recorded";
+
+    const rows = files.map((f, index) => `
+      <tr data-quarantine-index="${index}">
         <td><div class="file-name">
           <div class="f-ico">🦠</div>
-          <div>${escapeHtml(f.original_name)}<div class="q-sub">${escapeHtml(f.name)}</div></div>
+          <div>${escapeHtml(f.original_name || "unknown file")}<div class="q-sub">${escapeHtml(f.name || "")}</div></div>
         </div></td>
-        <td>${escapeHtml(f.from_folder || "Documents")}</td>
+        <td>${escapeHtml(f.from_folder || "unknown")}</td>
         <td>${escapeHtml(f.quarantined_at || f.modified || "-")}</td>
-        <td><span class="pill killed">KILLED PID ${f.killed_pid || 25576}</span> <span class="pill ro">READ-ONLY</span></td>
-        <td>${f.size || "38 B"}</td>
+        <td><span class="pill ${f.process_killed ? "killed" : "ro"}">${f.process_killed && f.killed_pid ? `KILLED PID ${escapeHtml(f.killed_pid)}` : "NO VERIFIED KILL"}</span> <span class="pill ro">READ-ONLY</span></td>
+        <td>${escapeHtml(f.size || "-")}</td>
       </tr>`).join("");
 
     document.getElementById("content").innerHTML = `
       <div class="q-banner">
         <b>🛡️ ${files.length} file${files.length === 1 ? "" : "s"} quarantined</b>
-        <span>Ransomware process killed: <b>${killedTxt}</b></span>
+        <span>Verified process terminations: <b>${killedTxt}</b></span>
       </div>
       <table class="file-table">
         <thead><tr>
@@ -309,6 +351,12 @@
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+    document.querySelectorAll("[data-quarantine-index]").forEach(row => {
+      row.addEventListener("click", () => {
+        const index = Number(row.dataset.quarantineIndex);
+        if (files[index]?.name) previewFile("Quarantine", files[index].name);
+      });
+    });
   }
 
   function renderFiles(files) {

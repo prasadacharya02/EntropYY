@@ -1,0 +1,431 @@
+{
+  "started": "2026-10-04T16:25:02.947020",
+  "phases": {
+    "0_baseline": {
+      "estate_files": 18,
+      "quarantine_files": 0,
+      "events_in_db": 0,
+      "max_event_id": 0,
+      "victim_status": {
+        "compromise_pct": 0.0,
+        "detected_family": null,
+        "encrypted_files": 0,
+        "quarantined_files": 0,
+        "ransom_notes": 0,
+        "system_status": "OPERATIONAL",
+        "total_files": 18,
+        "vault_unlocked": false
+      },
+      "pipeline": {
+        "online": true,
+        "engine": "rules",
+        "dry_run": false,
+        "pid": 4560,
+        "pid_alive": true
+      },
+      "ledger": {
+        "error": null,
+        "externally_anchored": false,
+        "head": "0000000000000000000000000000000000000000000000000000000000000000",
+        "mode": "local_sqlite_hash_chain",
+        "records": 0,
+        "tamper_evident": true,
+        "verified": true
+      }
+    },
+    "1_benign": {
+      "ops": [
+        {
+          "op": "create 3 txt",
+          "at": 0.451
+        },
+        {
+          "op": "edit 2 estate files",
+          "at": 0.452
+        },
+        {
+          "op": "copy 2 files",
+          "at": 0.452
+        },
+        {
+          "op": "rename 1 file",
+          "at": 0.452
+        },
+        {
+          "op": "delete 1 file",
+          "at": 0.452
+        },
+        {
+          "op": "create zip archive",
+          "at": 0.453
+        },
+        {
+          "op": "bulk copy 20 files",
+          "at": 0.455
+        },
+        {
+          "op": "read 25 files",
+          "at": 0.455
+        }
+      ],
+      "wall_seconds": 22.46,
+      "events_generated": 27,
+      "status_histogram": {
+        "IGNORED": 27
+      },
+      "quarantined_or_terminated": 0,
+      "any_non_ignored_decision": 0,
+      "victim_status_after": {
+        "compromise_pct": 0.0,
+        "detected_family": null,
+        "encrypted_files": 0,
+        "quarantined_files": 0,
+        "ransom_notes": 0,
+        "system_status": "OPERATIONAL",
+        "total_files": 18,
+        "vault_unlocked": false
+      },
+      "quarantine_files_after": 0,
+      "flagged_examples": []
+    },
+    "2_attack": {
+      "launch_ok": true,
+      "launch_at": 1791131125.4195836,
+      "samples": [
+        {
+          "t": 0.0,
+          "phase": "ENCRYPTING",
+          "files_hit": 0
+        },
+        {
+          "t": 0.21,
+          "phase": "ENCRYPTING",
+          "files_hit": 0
+        },
+        {
+          "t": 0.41,
+          "phase": "ENCRYPTING",
+          "files_hit": 0
+        },
+        {
+          "t": 0.61,
+          "phase": "ENCRYPTING",
+          "files_hit": 0
+        },
+        {
+          "t": 0.81,
+          "phase": "ENCRYPTING",
+          "files_hit": 0
+        },
+        {
+          "t": 1.02,
+          "phase": "ENCRYPTING",
+          "files_hit": 0
+        },
+        {
+          "t": 1.22,
+          "phase": "KILLED_BY_DEFENDER",
+          "files_hit": 1
+        }
+      ],
+      "contained_at": 0.003,
+      "phase_at_containment": "ENCRYPTING",
+      "first_event": 0.206,
+      "first_event_row": {
+        "file": "/home/user/EntropYY/victim_server/user_files/Documents/Tax_Returns.pdf",
+        "action": 1,
+        "status": "ALERTED",
+        "entropy": 7.8022
+      },
+      "first_responded_event": 0.206,
+      "first_responded_row": {
+        "file": "/home/user/EntropYY/victim_server/user_files/Documents/Tax_Returns.pdf",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.9168,
+        "termination": null,
+        "quarantine": null
+      },
+      "final_phase": "KILLED_BY_DEFENDER",
+      "elapsed": 1.22,
+      "launch_response": {
+        "ok": true,
+        "family": "wannacry",
+        "pid": 4620,
+        "stats": {
+          "active": true,
+          "family": "wannacry",
+          "phase": "ENCRYPTING",
+          "progress": 0,
+          "targets": 0,
+          "files_hit": 0,
+          "files_skipped": 0,
+          "notes_dropped": 0,
+          "bytes_encrypted": 0,
+          "pid": 4620,
+          "returncode": null,
+          "defender_killed": false,
+          "log": [
+            {
+              "time": "16:25:25",
+              "timestamp": "16:25:25",
+              "msg": "[simulation] Safe synthetic file-operation workload started; detections come from filesystem monitoring.",
+              "text": "[simulation] Safe synthetic file-operation workload started; detections come from filesystem monitoring.",
+              "line": "[simulation] Safe synthetic file-operation workload started; detections come from filesystem monitoring."
+            }
+          ]
+        }
+      },
+      "events_recorded": 4,
+      "rows": [
+        {
+          "id": 28,
+          "timestamp": "2026-10-04T16:25:25.511610",
+          "file_path": "/home/user/EntropYY/victim_server/user_files/Documents/Tax_Returns.pdf",
+          "event_type": "MODIFIED",
+          "entropy": 7.8022,
+          "entropy_delta": 2.8775,
+          "pid": 4620,
+          "process_name": "python",
+          "action": 1,
+          "status": "ALERTED",
+          "requested_action": 1,
+          "outcome": "ALERTED",
+          "restore_result": null,
+          "dry_run": 0,
+          "engine": "rules",
+          "confidence": null,
+          "explanation": "Multi-signal risk elevated (0.92, uncalibrated): entropy_change, format_integrity, multi_file_scope",
+          "q_values": null,
+          "risk_score": 0.9168,
+          "risk_evidence": "[\"entropy_change\", \"high_entropy_context\", \"format_integrity\", \"burst_rate\", \"multi_file_scope\", \"verified_writer_context\"]",
+          "structure_check": "{\"anomaly\": true, \"checked\": true, \"evidence\": \"missing PDF header or EOF marker\", \"format\": \"pdf\", \"valid\": false}",
+          "behavior_fingerprint": "3651fae4bd8a67b0",
+          "behavioral_match": "{\"confirmed\": false, \"distance\": null, \"matched\": false, \"sources\": []}",
+          "response_termination": null,
+          "response_quarantine": null
+        },
+        {
+          "id": 29,
+          "timestamp": "2026-10-04T16:25:26.515722",
+          "file_path": "/home/user/EntropYY/victim_server/user_files/Documents/Financial_Report_2024.xlsx",
+          "event_type": "MODIFIED",
+          "entropy": 7.8748,
+          "entropy_delta": 0.5738,
+          "pid": 4620,
+          "process_name": "python",
+          "action": 3,
+          "status": "TERMINATED+QUARANTINED",
+          "requested_action": 3,
+          "outcome": "QUARANTINED+RESTORED",
+          "restore_result": "RESTORED",
+          "dry_run": 0,
+          "engine": "rules",
+          "confidence": null,
+          "explanation": "CAMPAIGN CONFIRMED: 1 files with encrypted-data signatures in 15s | Multi-signal risk elevated (0.93, uncalibrated): format_integrity, repeated_format_anomaly, multi_file_scope",
+          "q_values": null,
+          "risk_score": 0.9296,
+          "risk_evidence": "[\"entropy_change\", \"high_entropy_context\", \"format_integrity\", \"repeated_format_anomaly\", \"burst_rate\", \"multi_file_scope\", \"verified_writer_context\"]",
+          "structure_check": "{\"anomaly\": true, \"checked\": true, \"evidence\": \"missing ZIP central directory\", \"format\": \"xlsx\", \"valid\": false}",
+          "behavior_fingerprint": "3651fae4bd8a67b0",
+          "behavioral_match": "{\"confirmed\": false, \"distance\": null, \"matched\": false, \"sources\": []}",
+          "response_termination": "TERMINATED",
+          "response_quarantine": "QUARANTINED"
+        },
+        {
+          "id": 30,
+          "timestamp": "2026-10-04T16:25:26.559082",
+          "file_path": "/home/user/EntropYY/victim_server/user_files/Documents/Tax_Returns.pdf.WNCRY",
+          "event_type": "RENAMED",
+          "entropy": 7.8022,
+          "entropy_delta": 0.0,
+          "pid": 4620,
+          "process_name": "python",
+          "action": 3,
+          "status": "TERMINATED+QUARANTINED",
+          "requested_action": 3,
+          "outcome": "QUARANTINED+RESTORED",
+          "restore_result": "RESTORED",
+          "dry_run": 0,
+          "engine": "rules",
+          "confidence": null,
+          "explanation": "CAMPAIGN CONFIRMED: 2 files with encrypted-data signatures in 15s | Rule-based detector | High entropy: 7.80 (threshold: 6.8)",
+          "q_values": null,
+          "risk_score": 0.987,
+          "risk_evidence": "[\"high_entropy_context\", \"format_integrity\", \"repeated_format_anomaly\", \"extension_transition\", \"rename_activity\", \"burst_rate\", \"multi_file_scope\", \"behavioral_intel\"]",
+          "structure_check": "{\"anomaly\": true, \"checked\": true, \"evidence\": \"missing PDF header or EOF marker\", \"format\": \"pdf\", \"valid\": false}",
+          "behavior_fingerprint": "3651fae4bd8a67b0",
+          "behavioral_match": "{\"confirmed\": false, \"distance\": 0, \"matched\": true, \"observations\": 1, \"sources\": [\"node-b221b6a7-b8ee-5dbe-9221-477e6bbdca5c\"]}",
+          "response_termination": "TERMINATED",
+          "response_quarantine": "QUARANTINED"
+        },
+        {
+          "id": 31,
+          "timestamp": "2026-10-04T16:25:26.515722",
+          "file_path": "/home/user/EntropYY/victim_server/user_files/Documents/Financial_Report_2024.xlsx",
+          "event_type": "MODIFIED",
+          "entropy": 7.8748,
+          "entropy_delta": 0.5738,
+          "pid": 4620,
+          "process_name": "python",
+          "action": 3,
+          "status": "TERMINATED+QUARANTINED",
+          "requested_action": 3,
+          "outcome": "QUARANTINED+RESTORED",
+          "restore_result": "RESTORED",
+          "dry_run": 0,
+          "engine": "rules",
+          "confidence": null,
+          "explanation": "Campaign sweep: CAMPAIGN CONFIRMED: 2 files with encrypted-data signatures in 15s | Rule-based detector | High entropy: 7.80 (threshold: 6.8)",
+          "q_values": null,
+          "risk_score": 0.987,
+          "risk_evidence": "[\"high_entropy_context\", \"format_integrity\", \"repeated_format_anomaly\", \"extension_transition\", \"rename_activity\", \"burst_rate\", \"multi_file_scope\", \"behavioral_intel\"]",
+          "structure_check": "{\"anomaly\": true, \"checked\": true, \"evidence\": \"missing ZIP central directory\", \"format\": \"xlsx\", \"valid\": false}",
+          "behavior_fingerprint": "3651fae4bd8a67b0",
+          "behavioral_match": "{\"confirmed\": false, \"distance\": null, \"matched\": false, \"sources\": []}",
+          "response_termination": "TERMINATE_REFUSED",
+          "response_quarantine": "QUARANTINED"
+        }
+      ],
+      "victim_status": {
+        "compromise_pct": 0.0,
+        "detected_family": null,
+        "encrypted_files": 0,
+        "quarantined_files": 3,
+        "ransom_notes": 0,
+        "system_status": "OPERATIONAL",
+        "total_files": 18,
+        "vault_unlocked": false
+      },
+      "estate_files": 43,
+      "quarantine_files": 6,
+      "quarantine_contents": [
+        "b16aa40bb53e_Financial_Report_2024.xlsx",
+        "b16aa40bb53e_Financial_Report_2024.xlsx.meta.json",
+        "02b538b7969b_Tax_Returns.pdf.WNCRY",
+        "02b538b7969b_Tax_Returns.pdf.WNCRY.meta.json",
+        "b597edf2b6ec_Financial_Report_2024.xlsx",
+        "b597edf2b6ec_Financial_Report_2024.xlsx.meta.json"
+      ],
+      "dashboard_stats": {
+        "avg_entropy": 4.02,
+        "blockchain_tx": 4,
+        "max_entropy": 7.87,
+        "max_risk": 0.987,
+        "quarantined": 3,
+        "quarantined_events": 3,
+        "recovery": 3,
+        "terminated": 2,
+        "threats": 4,
+        "total": 31
+      },
+      "threat_level": {
+        "label": "CRITICAL",
+        "level": 99,
+        "recent_critical": 3,
+        "recent_threats": 4,
+        "risk_method": "uncalibrated multi-signal evidence index"
+      },
+      "ledger": {
+        "address": "0x7d5fd3ad0ffbeaAf9df76d1CF74058b5E14ddC1D",
+        "connected": false,
+        "is_blockchain": false,
+        "is_tamper_evident": true,
+        "ledger_integrity": {
+          "error": null,
+          "externally_anchored": false,
+          "head": "ef452f93fcd9503ca16cb5a68dadb6fb5bfb9045135fb416e04ad8d6df0c5e50",
+          "mode": "local_sqlite_hash_chain",
+          "records": 4,
+          "tamper_evident": true,
+          "verified": true
+        },
+        "mode": "fallback",
+        "mode_label": "Local SQLite hash-chain ledger (tamper-evident; not a blockchain)",
+        "network": "http://127.0.0.1:7545",
+        "tx_count": 4
+      },
+      "attacker_stats": {
+        "active": false,
+        "family": "wannacry",
+        "phase": "KILLED_BY_DEFENDER",
+        "progress": 2.3,
+        "targets": 43,
+        "files_hit": 1,
+        "files_skipped": 0,
+        "notes_dropped": 0,
+        "bytes_encrypted": 2197,
+        "pid": null,
+        "returncode": 42,
+        "defender_killed": true,
+        "log": [
+          {
+            "time": "16:25:25",
+            "timestamp": "16:25:25",
+            "msg": "[simulation] Safe synthetic file-operation workload started; detections come from filesystem monitoring.",
+            "text": "[simulation] Safe synthetic file-operation workload started; detections come from filesystem monitoring.",
+            "line": "[simulation] Safe synthetic file-operation workload started; detections come from filesystem monitoring."
+          },
+          {
+            "time": "16:25:25",
+            "timestamp": "16:25:25",
+            "msg": "[attack] WannaCry malware process started (pid=4620, target=/home/user/EntropYY/victim_server/user_files)",
+            "text": "[attack] WannaCry malware process started (pid=4620, target=/home/user/EntropYY/victim_server/user_files)",
+            "line": "[attack] WannaCry malware process started (pid=4620, target=/home/user/EntropYY/victim_server/user_files)"
+          },
+          {
+            "time": "16:25:25",
+            "timestamp": "16:25:25",
+            "msg": "[attack] scan complete: 43 targets, 0 skipped",
+            "text": "[attack] scan complete: 43 targets, 0 skipped",
+            "line": "[attack] scan complete: 43 targets, 0 skipped"
+          },
+          {
+            "time": "16:25:25",
+            "timestamp": "16:25:25",
+            "msg": "[attack] encrypting 1/43  Tax_Returns.pdf  (569 bytes)",
+            "text": "[attack] encrypting 1/43  Tax_Returns.pdf  (569 bytes)",
+            "line": "[attack] encrypting 1/43  Tax_Returns.pdf  (569 bytes)"
+          },
+          {
+            "time": "16:25:26",
+            "timestamp": "16:25:26",
+            "msg": "[attack] encrypted  1/43  Tax_Returns.pdf -> Tax_Returns.pdf.WNCRY",
+            "text": "[attack] encrypted  1/43  Tax_Returns.pdf -> Tax_Returns.pdf.WNCRY",
+            "line": "[attack] encrypted  1/43  Tax_Returns.pdf -> Tax_Returns.pdf.WNCRY"
+          },
+          {
+            "time": "16:25:26",
+            "timestamp": "16:25:26",
+            "msg": "[attack] encrypting 2/43  Financial_Report_2024.xlsx  (1628 bytes)",
+            "text": "[attack] encrypting 2/43  Financial_Report_2024.xlsx  (1628 bytes)",
+            "line": "[attack] encrypting 2/43  Financial_Report_2024.xlsx  (1628 bytes)"
+          },
+          {
+            "time": "16:25:26",
+            "timestamp": "16:25:26",
+            "msg": "[attack] !! TERMINATED BY DEFENSE SYSTEM (pid=4620 killed by defender)",
+            "text": "[attack] !! TERMINATED BY DEFENSE SYSTEM (pid=4620 killed by defender)",
+            "line": "[attack] !! TERMINATED BY DEFENSE SYSTEM (pid=4620 killed by defender)"
+          }
+        ],
+        "victim": {
+          "exists": true,
+          "total": 43,
+          "locked": 0,
+          "notes": 0
+        }
+      }
+    },
+    "3_continuous": {
+      "probe_file": "/home/user/EntropYY/victim_server/user_files/AuditBenign/post_incident_probe.txt",
+      "events_after_probe": 1,
+      "probe_seen": true,
+      "pipeline": true
+    }
+  },
+  "verdict_inputs": {
+    "end_to_end_executed": true,
+    "notes": "see phases"
+  }
+}

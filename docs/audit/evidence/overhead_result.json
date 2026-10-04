@@ -1,0 +1,22 @@
+{
+  "idle": {
+    "label": "idle",
+    "cpu_percent_mean": 1.8,
+    "cpu_percent_peak": 4.0,
+    "rss_mb_mean": 129.1,
+    "rss_mb_peak": 129.1,
+    "read_bytes": 0,
+    "write_bytes": 122880,
+    "samples": 20
+  },
+  "under_load": {
+    "label": "burst_200_workload",
+    "cpu_percent_mean": 28.27,
+    "cpu_percent_peak": 109.9,
+    "rss_mb_mean": 130.7,
+    "rss_mb_peak": 130.9,
+    "read_bytes": 8192,
+    "write_bytes": 43757568,
+    "samples": 40
+  }
+}

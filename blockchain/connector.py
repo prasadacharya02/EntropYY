@@ -22,6 +22,7 @@
 
 import json
 import os
+import hashlib
 import sqlite3
 import sys
 import time
@@ -37,16 +38,25 @@ log = logging.getLogger("Blockchain")
 
 
 class LocalLedger:
-    """
-    Lightweight, self-contained replacement for a live smart contract.
+    """Append-only local hash-chain audit ledger (not an Ethereum chain).
 
-    Used when Ganache is unavailable. Stores the exact same fields a
-    real ThreatLogger event would contain, so the rest of the system
-    (dashboard, alerts, DQN feedback) behaves identically.
+    The previous-record hash links every row. This detects accidental or
+    unsophisticated edits/deletions when checked against the current head. It
+    is not tamper-proof against an administrator who can rewrite the entire
+    database and recompute every hash; external anchoring is needed for that.
     """
+
+    GENESIS = "0" * 64
+    FIELDS = ("id", "fingerprint", "threatType", "timestamp", "pid",
+              "entropy", "processName", "filePath", "actionTaken", "status")
 
     def __init__(self, path: str):
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        parent = os.path.dirname(os.path.abspath(path))
+        os.makedirs(parent, exist_ok=True)
+        self.conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=10000")
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS ledger (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,69 +68,163 @@ class LocalLedger:
                 processName TEXT,
                 filePath    TEXT,
                 actionTaken TEXT,
-                status      TEXT
+                status      TEXT,
+                prev_hash   TEXT,
+                record_hash TEXT
             )
         """)
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(ledger)")}
+        for name in ("prev_hash", "record_hash"):
+            if name not in columns:
+                self.conn.execute(f"ALTER TABLE ledger ADD COLUMN {name} TEXT")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS ledger_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.conn.commit()
-        self._seq = self.conn.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM ledger"
-        ).fetchone()[0]
-        self._lock = threading.Lock()
-        log.info("[BLOCKCHAIN] Local fallback ledger ready")
+        self._lock = threading.RLock()
+        self._integrity_error = None
+        self._initialize_hashes_if_legacy()
+        log.info("[AUDIT] Local SQLite hash-chain ledger ready; not a blockchain")
+
+    @classmethod
+    def _record_hash(cls, fields: dict) -> str:
+        canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _row_fields(self, row) -> dict:
+        return {name: row[name] for name in self.FIELDS}
+
+    def _verify_rows(self, rows=None) -> tuple[bool, str | None]:
+        if rows is None:
+            rows = self.conn.execute(
+                "SELECT * FROM ledger ORDER BY id ASC"
+            ).fetchall()
+        previous = self.GENESIS
+        expected_id = None
+        for row in rows:
+            if row["prev_hash"] != previous:
+                return False, f"previous hash mismatch at ledger row {row['id']}"
+            if expected_id is not None and int(row["id"]) <= expected_id:
+                return False, "ledger IDs are not strictly increasing"
+            expected_id = int(row["id"])
+            actual = self._record_hash(self._row_fields(row))
+            if not row["record_hash"] or row["record_hash"] != actual:
+                return False, f"record hash mismatch at ledger row {row['id']}"
+            previous = row["record_hash"]
+        return True, None
+
+    def _initialize_hashes_if_legacy(self) -> None:
+        initialized = self.conn.execute(
+            "SELECT value FROM ledger_meta WHERE key='hash_chain_initialized'"
+        ).fetchone()
+        rows = self.conn.execute("SELECT * FROM ledger ORDER BY id ASC").fetchall()
+        if initialized:
+            ok, error = self._verify_rows(rows)
+            if not ok:
+                self._integrity_error = error
+            return
+        if not rows:
+            self.conn.execute(
+                "INSERT INTO ledger_meta(key,value) VALUES('hash_chain_initialized','1')"
+            )
+            self.conn.commit()
+            return
+        # Upgrade a genuinely legacy ledger exactly once. Never silently
+        # re-chain partially hashed rows, because that could hide tampering.
+        if any(row["prev_hash"] or row["record_hash"] for row in rows):
+            self._integrity_error = "partial hash-chain migration; manual review required"
+            return
+        previous = self.GENESIS
+        for row in rows:
+            fields = self._row_fields(row)
+            digest = self._record_hash(fields)
+            self.conn.execute(
+                "UPDATE ledger SET prev_hash=?, record_hash=? WHERE id=?",
+                (previous, digest, row["id"]),
+            )
+            previous = digest
+        self.conn.execute(
+            "INSERT INTO ledger_meta(key,value) VALUES('hash_chain_initialized','1')"
+        )
+        self.conn.commit()
 
     def add(self, event: dict) -> int:
         with self._lock:
-            self._seq += 1
-            self.conn.execute(
-                """
-                INSERT INTO ledger
-                (id, fingerprint, threatType, timestamp, pid, entropy,
-                 processName, filePath, actionTaken, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    self._seq,
-                    str(event.get("fingerprint", "unknown"))[:64],
-                    str(event.get("threat_type", "ransomware")),
-                    int(time.time()),
-                    int(event.get("pid", 0)),
-                    int(float(event.get("entropy", 0)) * 100),
-                    str(event.get("process", "unknown"))[:100],
-                    str(event.get("file_path", ""))[:200],
-                    str(event.get("action", "0")),
-                    str(event.get("status", "unknown")),
-                ),
-            )
-            self.conn.commit()
-            return self._seq
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                ok, error = self._verify_rows()
+                if not ok:
+                    self._integrity_error = error
+                    raise RuntimeError(f"audit ledger integrity check failed: {error}")
+                previous_row = self.conn.execute(
+                    "SELECT id, record_hash FROM ledger ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                next_id = (int(previous_row["id"]) + 1) if previous_row else 1
+                previous_hash = previous_row["record_hash"] if previous_row else self.GENESIS
+                fields = {
+                    "id": next_id,
+                    "fingerprint": str(event.get("fingerprint", "unknown"))[:64],
+                    "threatType": str(event.get("threat_type", "ransomware")),
+                    "timestamp": int(time.time()),
+                    "pid": int(event.get("pid", 0) or 0),
+                    "entropy": int(float(event.get("entropy", 0) or 0) * 100),
+                    "processName": str(event.get("process", "unknown"))[:100],
+                    "filePath": str(event.get("file_path", ""))[:200],
+                    "actionTaken": str(event.get("action", "0")),
+                    "status": str(event.get("status", "unknown")),
+                }
+                digest = self._record_hash(fields)
+                self.conn.execute(
+                    "INSERT INTO ledger "
+                    "(id,fingerprint,threatType,timestamp,pid,entropy,processName,filePath,actionTaken,status,prev_hash,record_hash) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (*[fields[name] for name in self.FIELDS], previous_hash, digest),
+                )
+                self.conn.commit()
+                self._integrity_error = None
+                return next_id
+            except Exception:
+                self.conn.rollback()
+                raise
 
     def count(self) -> int:
         with self._lock:
-            return self.conn.execute(
-                "SELECT COUNT(*) FROM ledger"
-            ).fetchone()[0]
+            return int(self.conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0])
+
+    def verify_chain(self) -> bool:
+        with self._lock:
+            ok, error = self._verify_rows()
+            self._integrity_error = error
+            return ok
+
+    def integrity_status(self) -> dict:
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM ledger ORDER BY id ASC").fetchall()
+            ok, error = self._verify_rows(rows)
+            head = rows[-1]["record_hash"] if rows else self.GENESIS
+            self._integrity_error = error
+            return {"verified": ok, "records": len(rows), "head": head,
+                    "error": error, "mode": "local_sqlite_hash_chain",
+                    "tamper_evident": True, "externally_anchored": False}
+
+    def close(self) -> None:
+        with self._lock:
+            self.conn.close()
 
     def all(self) -> list:
         with self._lock:
             rows = self.conn.execute(
-                "SELECT id, fingerprint, threatType, timestamp, pid, "
-                "entropy, processName, filePath, actionTaken, status "
-                "FROM ledger ORDER BY id ASC"
+                "SELECT * FROM ledger ORDER BY id ASC"
             ).fetchall()
         return [
             {
-                "id"          : r[0],
-                "fingerprint" : r[1],
-                "threatType"  : r[2],
-                "timestamp"   : r[3],
-                "pid"         : r[4],
-                "entropy"     : (r[5] or 0) / 100,
-                "processName" : r[6],
-                "filePath"    : r[7],
-                "actionTaken" : r[8],
-                "status"      : r[9],
+                "id": row["id"], "fingerprint": row["fingerprint"],
+                "threatType": row["threatType"], "timestamp": row["timestamp"],
+                "pid": row["pid"], "entropy": (row["entropy"] or 0) / 100,
+                "processName": row["processName"], "filePath": row["filePath"],
+                "actionTaken": row["actionTaken"], "status": row["status"],
+                "prev_hash": row["prev_hash"], "record_hash": row["record_hash"],
             }
-            for r in rows
+            for row in rows
         ]
 
 
@@ -317,6 +421,11 @@ class BlockchainConnector:
         if self._worker and self._worker.is_alive():
             self._write_queue.put(None)
             self._worker.join(timeout=max(0.0, timeout))
+        if self.fallback is not None:
+            try:
+                self.fallback.close()
+            except Exception:
+                pass
         return drained
 
     def _log_event_dispatch(self, event: dict):
@@ -459,11 +568,16 @@ class BlockchainConnector:
             return False
 
     def get_status(self):
-        """Get detailed status info for diagnostics."""
+        """Get truthful ledger and connection status for diagnostics."""
+        ledger_integrity = (self.fallback.integrity_status()
+                            if self.mode == "fallback" and self.fallback
+                            else None)
         return {
             "mode"           : self.mode,
             "connected"      : self.verify_chain(),
             "is_blockchain"  : self.mode == "ganache",
+            "is_tamper_evident": bool(ledger_integrity and ledger_integrity["verified"]),
+            "ledger_integrity": ledger_integrity,
             "contract_loaded": self.contract is not None,
             "account"        : self.account,
             "contract_addr"  : config.CONTRACT_ADDRESS if self.contract else None,
