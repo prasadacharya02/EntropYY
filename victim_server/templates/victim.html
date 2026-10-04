@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>This PC — VICTIM-PC</title>
+  <style>
+    :root {
+      --bg: #f3f3f3; --panel: #ffffff; --border: #e5e5e5; --text: #1a1a1a;
+      --muted: #6b6b6b; --blue: #0078d4; --blue-soft: #e8f3ff;
+      --green: #107c10; --orange: #ff8c00; --red: #d13438; --sidebar: #fafafa;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Segoe UI", system-ui, sans-serif; background: #1b3a5f; color: var(--text); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 18px; overflow: hidden; }
+    
+    /* Fluent Custom Scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: #cdcdcd; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #a6a6a6; }
+
+    .window { width: min(1180px, 100%); height: min(720px, 92vh); background: var(--panel); border-radius: 10px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.35); display: flex; flex-direction: column; border: 1px solid #d0d0d0; }
+    .titlebar { height: 36px; background: #fff; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 14px; user-select: none; flex-shrink: 0; }
+    .title-left { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .app-icon { width: 16px; height: 16px; border-radius: 3px; background: linear-gradient(135deg, #60a5fa, #2563eb); }
+    .win-btns { display: flex; gap: 2px; }
+    .win-btns span { width: 46px; height: 28px; display: grid; place-items: center; color: #333; font-size: 11px; border-radius: 4px; }
+    .win-btns span:hover { background: #eee; }
+    .win-btns .x:hover { background: #e81123; color: #fff; }
+    .chrome { background: #f8f8f8; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .tabs { display: flex; gap: 2px; padding: 6px 8px 0; }
+    .tab { background: #fff; border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0; padding: 7px 14px; font-size: 12px; color: #333; }
+    .toolbar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; flex-wrap: wrap; background: #fff; border-top: 1px solid var(--border); }
+    .tool { border: none; background: transparent; padding: 6px 10px; border-radius: 6px; font-size: 12px; color: #333; cursor: pointer; }
+    .tool:hover { background: #f0f0f0; }
+    .tool.disabled { color: #aaa; cursor: default; }
+    .tool.lock-btn { color: #c45c00; font-weight: 600; }
+    .pathbar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: #fff; border-bottom: 1px solid var(--border); }
+    .navbtn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid transparent; background: #fff; cursor: pointer; }
+    .navbtn:hover { background: #f3f3f3; border-color: #ddd; }
+    .breadcrumb { flex: 1; height: 32px; border: 1px solid #d0d0d0; border-radius: 6px; display: flex; align-items: center; padding: 0 12px; font-size: 13px; background: #fff; gap: 8px; }
+    .search { width: 220px; height: 32px; border: 1px solid #d0d0d0; border-radius: 6px; padding: 0 12px; font-size: 13px; outline: none; }
+    
+    .body { flex: 1; display: grid; grid-template-columns: 220px 1fr; min-height: 0; background: #fff; height: 100%; overflow: hidden; }
+    .sidebar { background: var(--sidebar); border-right: 1px solid var(--border); padding: 10px 8px; overflow-y: auto; height: 100%; }
+    .side-label { font-size: 11px; color: var(--muted); padding: 8px 10px 4px; text-transform: uppercase; letter-spacing: .04em; }
+    .side-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; font-size: 13px; cursor: pointer; color: #222; }
+    .side-item:hover { background: #efefef; }
+    .side-item.active { background: var(--blue-soft); color: #0b5cab; font-weight: 600; }
+    .side-item .ico { width: 18px; text-align: center; }
+    .side-item.quarantine { color: #c45c00; }
+    .side-item.quarantine.active { background: #fff3e6; color: #9a3b00; }
+    .side-item .lock-tag { font-size: 10px; margin-left: auto; padding: 1px 6px; border-radius: 3px; background: #f0f0f0; color: #666; }
+    
+    .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
+    .status-strip { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); background: #fcfcfc; flex-shrink: 0; }
+    .badge { font-weight: 700; font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid transparent; }
+    .badge.protected { color: #0b5cab; background: #e8f3ff; border-color: #b3d7f5; }
+    
+    .content { flex: 1; overflow-y: auto; padding: 18px; background: #fff; min-height: 0; max-height: 100%; }
+    
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+    .card { border: 1px solid transparent; border-radius: 10px; padding: 14px 10px 12px; cursor: pointer; text-align: center; transition: .15s ease; background: #fff; position: relative; }
+    .card:hover { background: #f5f9ff; border-color: #cfe4ff; }
+    .card .folder-ico { font-size: 42px; line-height: 1; margin-bottom: 8px; }
+    .card .name { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+    .card .meta { font-size: 11px; color: var(--muted); }
+    .card.quarantine .name { color: #c45c00; }
+    .file-table { width: 100%; border-collapse: collapse; }
+    .file-table th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: #fff; z-index: 10; }
+    .file-table td { padding: 10px; border-bottom: 1px solid #f0f0f0; font-size: 13px; vertical-align: middle; }
+    .file-table tr:hover td { background: #f7fbff; cursor: pointer; }
+    .file-name { display: flex; align-items: center; gap: 10px; font-weight: 500; }
+    .f-ico { width: 28px; height: 28px; border-radius: 6px; display: grid; place-items: center; font-size: 14px; background: #f3f3f3; }
+    .empty { text-align: center; color: var(--muted); padding: 60px 20px; font-size: 14px; line-height: 1.6; }
+    .empty .big-ico { font-size: 48px; margin-bottom: 10px; }
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+    .modal-bg.show { display: flex; }
+    .modal { width: min(720px, 100%); max-height: 80vh; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,.3); display: flex; flex-direction: column; }
+    .modal-h { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); font-weight: 600; }
+    .modal-b { padding: 16px; overflow: auto; font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; background: #fafafa; color: #222; line-height: 1.45; }
+    .close-btn { border: none; background: #f0f0f0; width: 30px; height: 30px; border-radius: 6px; cursor: pointer; }
+    .taskbar { height: 40px; background: #2b2b2b; color: #fff; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 13px; flex-shrink: 0; }
+    .win-logo { width: 18px; height: 18px; background: #00a4ef; border-radius: 3px; }
+    .stats-mini { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+    .q-banner { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; padding: 12px 14px; margin-bottom: 12px; border: 1px solid #cfe6cf; background: #f3faf3; border-radius: 8px; font-size: 13px; color: #1d4d1d; }
+    .q-banner b { font-size: 15px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; letter-spacing: .3px; white-space: nowrap; }
+    .pill.killed { background: #fde7e9; color: #a4262c; }
+    .pill.contained { background: #e6f4ea; color: #0b6a0b; }
+    .pill.ro { background: #eef1f5; color: #4a5568; }
+    .q-sub { color: var(--muted); font-size: 11px; font-family: Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="titlebar">
+      <div class="title-left">
+        <div class="app-icon"></div>
+        <span id="windowTitle">This PC</span>
+      </div>
+      <div class="win-btns">
+        <span>—</span><span>□</span><span class="x">✕</span>
+      </div>
+    </div>
+
+    <div class="chrome">
+      <div class="tabs"><div class="tab">File Explorer</div></div>
+      <div class="toolbar">
+        <button class="tool disabled">+ New</button>
+        <button class="tool disabled">Cut</button>
+        <button class="tool disabled">Copy</button>
+        <button class="tool disabled">Paste</button>
+        <button class="tool disabled">Rename</button>
+        <button class="tool" onclick="refreshAll()">Refresh</button>
+        <button class="tool" onclick="showHome()">This PC</button>
+        <button class="tool lock-btn" id="vaultBtn" onclick="handleVaultBtn()">🔓 Lock Vault</button>
+      </div>
+      <div class="pathbar">
+        <button class="navbtn" onclick="showHome()" title="Up">↑</button>
+        <div class="breadcrumb">
+          <span>📁</span>
+          <span id="pathText">This PC</span>
+        </div>
+        <input class="search" id="searchBox" placeholder="Search This PC" oninput="filterFiles()" />
+      </div>
+    </div>
+
+    <div class="body">
+      <aside class="sidebar">
+        <div class="side-label">Home</div>
+        <div class="side-item" data-goto="Desktop" onclick="openFolder('Desktop')"><span class="ico">🖥️</span>Desktop</div>
+        <div class="side-item" data-goto="Downloads" onclick="openFolder('Downloads')"><span class="ico">⬇️</span>Downloads</div>
+        <div class="side-item" data-goto="Documents" onclick="openFolder('Documents')"><span class="ico">📄</span>Documents</div>
+        <div class="side-item" data-goto="Pictures" onclick="openFolder('Pictures')"><span class="ico">🖼️</span>Pictures</div>
+
+        <div class="side-label">This PC</div>
+        <div class="side-item active" id="navThisPC" onclick="showHome()"><span class="ico">💻</span>This PC</div>
+        <div class="side-item" data-goto="Desktop" onclick="openFolder('Desktop')"><span class="ico">🖥️</span>Desktop</div>
+        <div class="side-item" data-goto="Documents" onclick="openFolder('Documents')"><span class="ico">📁</span>Documents</div>
+        <div class="side-item" data-goto="Downloads" onclick="openFolder('Downloads')"><span class="ico">📁</span>Downloads</div>
+        <div class="side-item" data-goto="Pictures" onclick="openFolder('Pictures')"><span class="ico">📁</span>Pictures</div>
+        <div class="side-item quarantine" data-goto="Quarantine" onclick="openFolder('Quarantine')">
+          <span class="ico">🛡️</span>Quarantine Vault
+          <span class="lock-tag" id="vaultTag">🔓</span>
+        </div>
+        <div class="side-item" onclick="showHome()"><span class="ico">💾</span>Local Disk (C:)</div>
+      </aside>
+
+      <section class="main">
+        <div class="status-strip">
+          <div class="stats-mini" id="summaryText">Loading…</div>
+          <div class="badge protected">🛡️ Ransomware Shield · Monitoring</div>
+        </div>
+        <div class="content" id="content"></div>
+      </section>
+    </div>
+
+    <div class="taskbar">
+      <div class="win-logo"></div>
+      <span>Windows 11 · VICTIM-PC</span>
+      <span id="liveClock" style="opacity:.8;margin-left:8px;"></span>
+    </div>
+  </div>
+
+  <div class="modal-bg" id="modalBg" onclick="closeModal(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-h">
+        <span id="modalTitle">Preview</span>
+        <button class="close-btn" onclick="hideModal()">✕</button>
+      </div>
+      <div class="modal-b" id="modalBody">Loading…</div>
+    </div>
+  </div>
+
+<script>
+  const FOLDER_ICONS = {
+    Documents: "📁", Downloads: "📁", Desktop: "🖥️",
+    Pictures: "🖼️", Quarantine: "🛡️", "Local Disk (C:)": "💾",
+  };
+
+  let currentFolder = null;
+  let folderCache = [];
+  let fileCache = [];
+
+  function setActiveNav(folder) {
+    document.querySelectorAll(".side-item").forEach(el => el.classList.remove("active"));
+    if (!folder) { document.getElementById("navThisPC")?.classList.add("active"); return; }
+    document.querySelectorAll(`.side-item[data-goto="${folder}"]`).forEach(el => el.classList.add("active"));
+  }
+
+  async function fetchJSON(url) {
+    const res = await fetch(url);
+    if (!res.ok && res.status !== 401) throw new Error(url + " failed");
+    return res.json();
+  }
+
+  function handleVaultBtn() {
+    openFolder('Quarantine');
+  }
+
+  function setNeutralStatus(text) {
+    const el = document.getElementById("summaryText");
+    if (el) el.textContent = text || "";
+  }
+
+  async function refreshStatus() {
+    if (currentFolder) {
+      setNeutralStatus(`${fileCache.length} item${fileCache.length === 1 ? "" : "s"}`);
+    } else {
+      const total = folderCache.filter(f => f.name !== "Quarantine").reduce((a, f) => a + (f.file_count || 0), 0);
+      setNeutralStatus(`${total} files`);
+    }
+  }
+
+  async function showHome() {
+    currentFolder = null;
+    setActiveNav(null);
+    document.getElementById("pathText").textContent = "This PC";
+    document.getElementById("windowTitle").textContent = "This PC";
+    document.getElementById("searchBox").value = "";
+
+    try { folderCache = await fetchJSON("/api/folders"); }
+    catch { folderCache = []; }
+
+    const totalFiles = folderCache.filter(f => f.name !== "Quarantine").reduce((a, f) => a + (f.file_count || 0), 0);
+
+    const cards = [
+      ...folderCache.map(f => ({
+        name: f.name, count: f.file_count, size: f.size,
+        locked: f.locked, isFolder: true,
+      })),
+      { name: "Local Disk (C:)", count: totalFiles, size: "", locked: false, isFolder: false }
+    ];
+
+    const html = `<div class="grid">${cards.map(c => {
+      const isQ = c.name === "Quarantine";
+      let meta = `${c.count || 0} items`;
+      const cls = ["card", isQ ? "quarantine" : ""].join(" ");
+      const click = c.name === "Local Disk (C:)" ? "showHome()" : `openFolder('${c.name}')`;
+
+      return `<div class="${cls}" onclick="${click}">
+                <div class="folder-ico">${FOLDER_ICONS[c.name] || "📁"}</div>
+                <div class="name">${c.name}</div>
+                <div class="meta">${meta}${c.size && !isQ ? " · " + c.size : ""}</div>
+              </div>`;
+    }).join("")}</div>`;
+    document.getElementById("content").innerHTML = html;
+    setNeutralStatus(`${totalFiles} files`);
+  }
+
+  async function openFolder(name) {
+    currentFolder = name;
+    setActiveNav(name);
+    document.getElementById("pathText").textContent = `This PC \\ ${name}`;
+    document.getElementById("windowTitle").textContent = name;
+    document.getElementById("searchBox").value = "";
+
+    try {
+      const res = await fetch("/api/files/" + encodeURIComponent(name));
+      fileCache = await res.json();
+      if (!Array.isArray(fileCache)) fileCache = fileCache.files || [];
+    } catch { fileCache = []; }
+
+    renderFiles(fileCache);
+    await refreshStatus();
+  }
+
+  function fileIcon(file) {
+    const ext = (file.extension || "").toLowerCase();
+    if ([".jpg",".jpeg",".png",".gif",".bmp"].includes(ext)) return "🖼️";
+    if ([".doc",".docx"].includes(ext)) return "📄";
+    if ([".xls",".xlsx",".csv"].includes(ext)) return "📊";
+    if (ext === ".pdf") return "📕";
+    if ([".zip",".rar",".7z"].includes(ext)) return "🗜️";
+    if ([".txt",".log"].includes(ext)) return "📝";
+    return "📄";
+  }
+
+  function renderQuarantine(files) {
+    const killed = {};
+    files.forEach(f => { if (f.process_killed && f.killed_pid) killed[f.killed_pid] = f.killed_name; });
+    const killedTxt = Object.keys(killed).length
+      ? Object.entries(killed).map(([pid, n]) => `PID ${pid} (${escapeHtml(n || "ransomware.exe")})`).join(", ")
+      : "PID 25576 (ransomware_ryuk.exe)";
+      
+    const rows = files.map(f => `
+      <tr onclick="previewFile('Quarantine', \`${f.name.replace(/`/g, "")}\`)">
+        <td><div class="file-name">
+          <div class="f-ico">🦠</div>
+          <div>${escapeHtml(f.original_name)}<div class="q-sub">${escapeHtml(f.name)}</div></div>
+        </div></td>
+        <td>${escapeHtml(f.from_folder || "Documents")}</td>
+        <td>${escapeHtml(f.quarantined_at || f.modified || "-")}</td>
+        <td><span class="pill killed">KILLED PID ${f.killed_pid || 25576}</span> <span class="pill ro">READ-ONLY</span></td>
+        <td>${f.size || "38 B"}</td>
+      </tr>`).join("");
+
+    document.getElementById("content").innerHTML = `
+      <div class="q-banner">
+        <b>🛡️ ${files.length} file${files.length === 1 ? "" : "s"} quarantined</b>
+        <span>Ransomware process killed: <b>${killedTxt}</b></span>
+      </div>
+      <table class="file-table">
+        <thead><tr>
+          <th style="width:38%">Original file</th><th style="width:14%">From</th>
+          <th style="width:20%">Quarantined</th><th style="width:18%">Response</th>
+          <th style="width:10%">Size</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  function renderFiles(files) {
+    if (currentFolder === "Quarantine") { renderQuarantine(files); return; }
+    if (!files.length) {
+      document.getElementById("content").innerHTML = `
+        <div class="empty">
+          <div class="big-ico">📁</div>This folder is empty.
+        </div>`;
+      return;
+    }
+
+    const rows = files.map(f => `
+      <tr onclick="previewFile('${currentFolder}', \`${f.name.replace(/`/g, "")}\`)">
+        <td><div class="file-name">
+          <div class="f-ico">${fileIcon(f)}</div>
+          <div>${escapeHtml(f.name)}</div>
+        </div></td>
+        <td>${f.modified || "-"}</td>
+        <td>${f.extension || "File"}</td>
+        <td>${f.size || "-"}</td>
+      </tr>`).join("");
+
+    document.getElementById("content").innerHTML = `
+      <table class="file-table">
+        <thead><tr>
+          <th style="width:50%">Name</th><th style="width:20%">Date modified</th>
+          <th style="width:15%">Type</th><th style="width:15%">Size</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  function filterFiles() {
+    if (currentFolder == null) return;
+    const q = (document.getElementById("searchBox").value || "").toLowerCase();
+    const filtered = fileCache.filter(f => ((f.name || "") + " " + (f.original_name || "")).toLowerCase().includes(q));
+    renderFiles(filtered);
+  }
+
+  async function previewFile(folder, filename) {
+    document.getElementById("modalTitle").textContent = filename;
+    document.getElementById("modalBody").textContent = "Loading…";
+    document.getElementById("modalBg").classList.add("show");
+    try {
+      const res = await fetch(`/api/file/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`);
+      const data = await res.json();
+      if (data.error) document.getElementById("modalBody").textContent = data.error;
+      else document.getElementById("modalBody").textContent = (data.content || "");
+    } catch { document.getElementById("modalBody").textContent = "Unable to preview file."; }
+  }
+
+  function hideModal() { document.getElementById("modalBg").classList.remove("show"); }
+  function closeModal(e) { if (e.target.id === "modalBg") hideModal(); }
+  function escapeHtml(s) { return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+
+  async function refreshAll() {
+    if (currentFolder) await openFolder(currentFolder);
+    else await showHome();
+  }
+
+  function tickClock() {
+    document.getElementById("liveClock").textContent = new Date().toLocaleTimeString();
+  }
+
+  showHome();
+  tickClock();
+  setInterval(tickClock, 1000);
+  setInterval(() => {
+    if (document.querySelector(".modal-bg.show")) return;
+    if (currentFolder) openFolder(currentFolder);
+    else showHome();
+  }, 3000);
+</script>
+</body>
+</html>
