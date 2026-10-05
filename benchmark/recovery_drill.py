@@ -48,6 +48,7 @@ from benchmark.runner import _Clock
 from benchmark.scenarios import ATTACKS, WORKLOADS
 from blockchain.fingerprint_exchange import FingerprintExchange
 from entropy.entropy_calculator import EntropyAnalyzer
+from storage.database import _EVENTS_SCHEMA, _ensure_events_columns
 from monitoring.defense_guard import collect_threat_flags
 from monitoring.pipeline_runner import execute_response, make_decision
 from response.backup_manager import BackupManager
@@ -84,19 +85,14 @@ def run_drill_scenario(scenario, *, baseline: bool, workdir: Path,
         backup.snapshot_directory(str(root), source="startup_baseline")
         analyzer.snapshot_directory(str(root))
 
-    # A real (throwaway) events DB so the response code path that
-    # records every decision is exercised exactly as in production.
+    # A real (throwaway) events DB so the response code path that records
+    # every decision is exercised exactly as in production. The schema comes
+    # from the shared initializer so a column added to the product schema can
+    # never silently diverge from what the drill persists.
     events_db = sqlite3.connect(":memory:")
-    events_db.execute("""
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT,
-            file_path TEXT, event_type TEXT, entropy REAL,
-            entropy_delta REAL, pid INTEGER, process_name TEXT,
-            action INTEGER, status TEXT, requested_action INTEGER,
-            outcome TEXT, restore_result TEXT, dry_run INTEGER,
-            engine TEXT, confidence REAL, explanation TEXT, q_values TEXT
-        )
-    """)
+    events_db.row_factory = sqlite3.Row
+    events_db.execute(_EVENTS_SCHEMA)
+    _ensure_events_columns(events_db)
     events_db.commit()
 
     clock = _Clock()
@@ -163,6 +159,7 @@ def run_drill_scenario(scenario, *, baseline: bool, workdir: Path,
                 "file_extension": result.get("file_extension", ""),
                 "file_size": result.get("file_size", 0),
                 "file_hash": result.get("file_hash", ""),
+            "content_hash": result.get("content_hash"),
                 "entropy_overall": result.get("entropy_overall", 0.0),
                 "entropy_delta": result.get("entropy_delta", 0.0),
                 "threat_score": result.get("threat_score", 0.0),

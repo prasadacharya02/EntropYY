@@ -98,7 +98,7 @@ if abs(entropy - last_clean_entropy) >= DELTA: return False
 ## Results
 
 - Live WannaCry: kill at file 2/18, 2.7s, rc=42 instant, 0 .WNCRY, 18/18 restored
-- Benchmark: 42/48 (87.5%) rules, 0 FQ, slow_crawler 6/6, polymorphic 6/6, blind spot image_blindspot
+- Benchmark: 48/48 (100%) rules, 0 FQ, image_blindspot closed by format integrity (boundary documented)
 - RF: 48/48 (100%) but 6 FQ
 - Tests: 126 pass
 - Blockchain: fallback ledger 4 tx, labeled

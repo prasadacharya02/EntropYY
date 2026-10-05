@@ -1,0 +1,411 @@
+[
+  {
+    "case": "T1_fast_random_burst",
+    "technique": "burst",
+    "target": "/home/user/EntropYY/victim_server/user_files/AuditBypass/T1",
+    "files_attempted": 20,
+    "child_exit_code": 0,
+    "child_killed": false,
+    "child_killed_by_signal": false,
+    "events": 20,
+    "flagged_events": 20,
+    "max_action": 1,
+    "max_risk": 0.7564,
+    "quarantined": 0,
+    "terminated": 0,
+    "restored": 0,
+    "reasons": [
+      "burst_rate",
+      "high_entropy_context",
+      "multi_file_scope"
+    ],
+    "sample": [
+      {
+        "file": "payload_13.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.3112,
+        "entropy": 7.9591
+      },
+      {
+        "file": "payload_15.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.3793,
+        "entropy": 7.961
+      },
+      {
+        "file": "payload_10.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.4456,
+        "entropy": 7.9642
+      },
+      {
+        "file": "payload_17.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.5099,
+        "entropy": 7.9601
+      }
+    ],
+    "detected": true,
+    "elapsed_s": 10.5,
+    "child_output": [
+      "technique=burst finished"
+    ],
+    "timeline_tail": [
+      {
+        "t": 0.5,
+        "events": 19,
+        "max_action": 1
+      }
+    ]
+  },
+  {
+    "case": "T2_extension_camouflage",
+    "technique": "camouflage",
+    "target": "/home/user/EntropYY/victim_server/user_files/AuditBypass/T2",
+    "files_attempted": 10,
+    "child_exit_code": 0,
+    "child_killed": false,
+    "child_killed_by_signal": false,
+    "events": 10,
+    "flagged_events": 10,
+    "max_action": 1,
+    "max_risk": 0.6698,
+    "quarantined": 0,
+    "terminated": 0,
+    "restored": 0,
+    "reasons": [
+      "burst_rate",
+      "high_entropy_context",
+      "multi_file_scope"
+    ],
+    "sample": [
+      {
+        "file": "payload_8.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.6005,
+        "entropy": 7.96
+      },
+      {
+        "file": "payload_3.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.607,
+        "entropy": 7.9636
+      },
+      {
+        "file": "payload_2.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.6135,
+        "entropy": 7.9611
+      },
+      {
+        "file": "payload_1.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.62,
+        "entropy": 7.9647
+      }
+    ],
+    "detected": true,
+    "elapsed_s": 10.5,
+    "child_output": [
+      "technique=camouflage finished"
+    ],
+    "timeline_tail": [
+      {
+        "t": 0.5,
+        "events": 10,
+        "max_action": 1
+      }
+    ]
+  },
+  {
+    "case": "T3_entropy_preserving_xor",
+    "technique": "xor",
+    "target": "/home/user/EntropYY/victim_server/user_files/AuditBypass/T3",
+    "files_attempted": 10,
+    "child_exit_code": 0,
+    "child_killed": false,
+    "child_killed_by_signal": false,
+    "events": 10,
+    "flagged_events": 0,
+    "max_action": 0,
+    "max_risk": 0.5283,
+    "quarantined": 0,
+    "terminated": 0,
+    "restored": 0,
+    "reasons": [],
+    "sample": [
+      {
+        "file": "payload_3.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4293,
+        "entropy": 3.7035
+      },
+      {
+        "file": "payload_7.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4386,
+        "entropy": 3.7035
+      },
+      {
+        "file": "payload_9.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4478,
+        "entropy": 3.7035
+      },
+      {
+        "file": "payload_1.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4571,
+        "entropy": 3.7035
+      }
+    ],
+    "detected": false,
+    "elapsed_s": 12.5,
+    "child_output": [
+      "technique=xor finished"
+    ],
+    "timeline_tail": [
+      {
+        "t": 0.5,
+        "events": 10,
+        "max_action": 0
+      }
+    ]
+  },
+  {
+    "case": "T4_low_and_slow_random",
+    "technique": "low_and_slow_random",
+    "target": "/home/user/EntropYY/victim_server/user_files/AuditBypass/T4",
+    "files_attempted": 4,
+    "child_exit_code": 0,
+    "child_killed": false,
+    "child_killed_by_signal": false,
+    "events": 4,
+    "flagged_events": 4,
+    "max_action": 1,
+    "max_risk": 0.607,
+    "quarantined": 0,
+    "terminated": 0,
+    "restored": 0,
+    "reasons": [
+      "burst_rate",
+      "high_entropy_context",
+      "multi_file_scope"
+    ],
+    "sample": [
+      {
+        "file": "payload_0.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.6005,
+        "entropy": 7.9595
+      },
+      {
+        "file": "payload_1.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.607,
+        "entropy": 7.9619
+      },
+      {
+        "file": "payload_2.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.607,
+        "entropy": 7.9636
+      },
+      {
+        "file": "payload_3.txt",
+        "action": 1,
+        "status": "ALERTED",
+        "risk": 0.607,
+        "entropy": 7.9677
+      }
+    ],
+    "detected": true,
+    "elapsed_s": 34.0,
+    "child_output": [
+      "technique=low_and_slow_random finished"
+    ],
+    "timeline_tail": [
+      {
+        "t": 23.0,
+        "events": 4,
+        "max_action": 1
+      },
+      {
+        "t": 23.5,
+        "events": 4,
+        "max_action": 1
+      },
+      {
+        "t": 24.0,
+        "events": 4,
+        "max_action": 1
+      }
+    ]
+  },
+  {
+    "case": "T5_low_and_slow_xor",
+    "technique": "low_and_slow_xor",
+    "target": "/home/user/EntropYY/victim_server/user_files/AuditBypass/T5",
+    "files_attempted": 3,
+    "child_exit_code": 0,
+    "child_killed": false,
+    "child_killed_by_signal": false,
+    "events": 3,
+    "flagged_events": 0,
+    "max_action": 0,
+    "max_risk": 0.4386,
+    "quarantined": 0,
+    "terminated": 0,
+    "restored": 0,
+    "reasons": [],
+    "sample": [
+      {
+        "file": "payload_0.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4293,
+        "entropy": 3.7035
+      },
+      {
+        "file": "payload_1.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4386,
+        "entropy": 3.7035
+      },
+      {
+        "file": "payload_2.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4386,
+        "entropy": 3.7035
+      }
+    ],
+    "detected": false,
+    "elapsed_s": 38.0,
+    "child_output": [
+      "technique=low_and_slow_xor finished"
+    ],
+    "timeline_tail": [
+      {
+        "t": 23.0,
+        "events": 3,
+        "max_action": 0
+      },
+      {
+        "t": 23.5,
+        "events": 3,
+        "max_action": 0
+      },
+      {
+        "t": 24.0,
+        "events": 3,
+        "max_action": 0
+      }
+    ]
+  },
+  {
+    "case": "T6_outside_watch_scope",
+    "technique": "outside_watch",
+    "target": "/tmp/audit/blindspot",
+    "files_attempted": 5,
+    "child_exit_code": 0,
+    "child_killed": false,
+    "child_killed_by_signal": false,
+    "events": 0,
+    "flagged_events": 0,
+    "max_action": null,
+    "max_risk": null,
+    "quarantined": 0,
+    "terminated": 0,
+    "restored": 0,
+    "reasons": [],
+    "sample": [],
+    "detected": false,
+    "elapsed_s": 10.5,
+    "child_output": [
+      "technique=outside_watch finished"
+    ],
+    "timeline_tail": [
+      {
+        "t": 0.5,
+        "events": 0,
+        "max_action": null
+      }
+    ]
+  },
+  {
+    "case": "T7_burst_200_baseline",
+    "technique": "burst_200",
+    "target": "/home/user/EntropYY/victim_server/user_files/AuditBypass/T7",
+    "files_attempted": 200,
+    "child_exit_code": 0,
+    "child_killed": false,
+    "child_killed_by_signal": false,
+    "events": 200,
+    "flagged_events": 0,
+    "max_action": 0,
+    "max_risk": 0.7768,
+    "quarantined": 0,
+    "terminated": 0,
+    "restored": 0,
+    "reasons": [],
+    "sample": [
+      {
+        "file": "tiny_59.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4293,
+        "entropy": 3.3921
+      },
+      {
+        "file": "tiny_159.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4386,
+        "entropy": 3.3921
+      },
+      {
+        "file": "tiny_146.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4478,
+        "entropy": 3.3921
+      },
+      {
+        "file": "tiny_194.txt",
+        "action": 0,
+        "status": "IGNORED",
+        "risk": 0.4571,
+        "entropy": 3.3921
+      }
+    ],
+    "detected": false,
+    "elapsed_s": 20.5,
+    "child_output": [
+      "technique=burst_200 finished"
+    ],
+    "timeline_tail": [
+      {
+        "t": 0.5,
+        "events": 19,
+        "max_action": 0
+      }
+    ]
+  }
+]

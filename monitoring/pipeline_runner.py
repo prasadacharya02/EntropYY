@@ -33,6 +33,12 @@ from response.defender_actions   import get_registry as defender_actions
 from storage.database             import init_db as initialize_database
 from storage.database             import connect as connect_database
 from storage.database             import write_pipeline_heartbeat
+from decision.risk_engine          import (
+    CONTENT_EVIDENCE_FAMILIES,
+    RiskEngine,
+)
+from fingerprint.behavioral        import behavioral_fingerprint
+from blockchain.behavioral_exchange import BehavioralIntelExchange
 
 # Logger must exist before the optional DQN import: the fallback path logs
 # missing PyTorch/model errors during module import.
@@ -109,27 +115,39 @@ from blockchain.fingerprint_exchange import get_exchange  # noqa: F401
 
 def save_to_db(conn, event, action, status, outcome=None, decision=None,
                restore_result=None):
-    """Save a processed event to the SQLite database."""
+    """Persist the observed event, risk evidence and actual response results."""
     try:
-        proc     = event.get("process") or {}
-        pid      = proc.get("pid")      if isinstance(proc, dict) else None
-        procname = proc.get("name", "unknown") if isinstance(proc, dict) else "unknown"
+        proc = event.get("process") or {}
+        pid = proc.get("pid") if isinstance(proc, dict) else None
+        procname = proc.get("name") if isinstance(proc, dict) else None
         outcome = outcome or status
         decision = decision or {}
+        response = event.get("response_results") or {}
+        match = event.get("behavioral_match") or {}
+        if isinstance(match, dict):
+            match = {key: match.get(key) for key in
+                     ("matched", "confirmed", "distance", "sources", "observations")
+                     if key in match}
+        structure = event.get("structure")
         q_values = decision.get("q_values")
+        risk_score = decision.get("risk_score")
+        if risk_score is None:
+            risk_score = event.get("risk_score")
         conn.execute("""
             INSERT INTO events
-            (timestamp, file_path, event_type, entropy,
-             entropy_delta, pid, process_name, action, status,
-             requested_action, outcome, restore_result, dry_run,
-             engine, confidence, explanation, q_values)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (timestamp, file_path, event_type, entropy, entropy_delta, pid,
+             process_name, action, status, requested_action, outcome,
+             restore_result, dry_run, engine, confidence, explanation,
+             q_values, risk_score, risk_evidence, structure_check,
+             behavior_fingerprint, behavioral_match, response_termination,
+             response_quarantine)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             event.get("timestamp", datetime.now().isoformat()),
             event.get("file_path", ""),
             event.get("event_type", ""),
-            event.get("entropy_overall") or 0.0,
-            event.get("entropy_delta")   or 0.0,
+            event.get("entropy_overall"),
+            event.get("entropy_delta"),
             pid,
             procname,
             action,
@@ -139,13 +157,20 @@ def save_to_db(conn, event, action, status, outcome=None, decision=None,
             restore_result,
             1 if config.DRY_RUN else 0,
             decision.get("engine") or "rules",
-            float(decision.get("confidence") or 0.0),
+            decision.get("confidence"),
             decision.get("explanation") or "",
             json.dumps(q_values) if q_values is not None else None,
+            float(risk_score) if risk_score is not None else None,
+            json.dumps(decision.get("risk_evidence") or event.get("risk_evidence") or []),
+            json.dumps(structure, sort_keys=True) if structure is not None else None,
+            event.get("behavior_fingerprint"),
+            json.dumps(match, sort_keys=True) if match else None,
+            response.get("termination"),
+            response.get("quarantine"),
         ))
         conn.commit()
     except Exception as e:
-        log.error(f"[DB] Save failed: {e}")
+        log.error("[DB] Save failed: %s", e)
 
 
 # ============================================================
@@ -194,9 +219,12 @@ def make_decision(event: dict) -> int:
     if score >= 40:
         return config.ACTION_ALERT
 
-    # Speed alone is useful for detection, but not enough for quarantine.
-    if hi_speed:
-        return config.ACTION_ALERT
+    # NOTE: velocity is deliberately NOT an alert rule here.  A backup
+    # run, a bulk copy or a report generator legitimately writes far
+    # above the per-second threshold; alerting on speed alone produced a
+    # measured 170-alert flood for 200 clean files.  Velocity stays in
+    # the risk index, where it combines with content evidence, and in
+    # the campaign layer, which requires structural or entropy evidence.
 
     # Do not alert merely because a legitimate known file type is high
     # entropy. Unknown high-entropy files remain visible as alerts.
@@ -231,7 +259,7 @@ def execute_response(action: int,
         pid      = None
 
     entropy   = event.get("entropy_overall") or 0.0
-    file_hash = event.get("file_hash", "")
+    file_hash = event.get("content_hash") or ""
     status    = ACTION_LABELS.get(action, "UNKNOWN")
     fname     = os.path.basename(file_path)
     outcome   = status
@@ -250,6 +278,9 @@ def execute_response(action: int,
     # ── IGNORE ───────────────────────────────────
     if action == config.ACTION_IGNORE:
         log.info(f"  [OK]     {fname} | H={entropy:.2f}")
+        event = dict(event, response_results={
+            "termination": None, "quarantine": None, "restore": None,
+        })
         save_to_db(db_conn, event, action, status, outcome, decision)
         return status
 
@@ -262,7 +293,8 @@ def execute_response(action: int,
     if action == config.ACTION_TERMINATE:
         log.warning(f"  [KILL]   {fname} | H={entropy:.2f}")
         killed = _terminate_process(pid, procname, proc)
-        terminate_result = "TERMINATED" if killed else "TERMINATE_REFUSED"
+        terminate_result = ("DRY_RUN_TERMINATE" if config.DRY_RUN
+                            else "TERMINATED" if killed else "TERMINATE_REFUSED")
         outcome = "DRY_RUN_TERMINATE" if config.DRY_RUN else (
             "TERMINATED" if killed else "TERMINATE_REFUSED"
         )
@@ -271,7 +303,8 @@ def execute_response(action: int,
     if action == config.ACTION_TERMINATE_QUARANTINE:
         log.warning(f"  [THREAT] {fname} | H={entropy:.2f}")
         killed = _terminate_process(pid, procname, proc)
-        terminate_result = "TERMINATED" if killed else "TERMINATE_REFUSED"
+        terminate_result = ("DRY_RUN_TERMINATE" if config.DRY_RUN
+                            else "TERMINATED" if killed else "TERMINATE_REFUSED")
         # Carry the kill into the vault record (the campaign's kill
         # covers sweep files contained right after it).
         event = dict(event, response_kill=_kill_record(
@@ -371,15 +404,20 @@ def execute_response(action: int,
         except Exception as e:
             log.error(f"  [REPORT] Generation failed: {e}")
 
+    event = dict(event, response_results={
+        "termination": terminate_result,
+        "quarantine": quarantine_result,
+        "restore": restore_result,
+    })
     save_to_db(db_conn, event, action, status, outcome, decision,
                restore_result)
 
     # ── Blockchain log ────────────────────────────
     if action >= config.ACTION_ALERT:
         try:
-            fingerprint = file_hash or hashlib.sha256(
-                file_path.encode()
-            ).hexdigest()
+            # Never substitute a path-derived or sampled digest for file
+            # evidence. An absent exact content hash stays absent.
+            fingerprint = file_hash or ""
 
             bc.log_event({
                 "fingerprint" : fingerprint[:64],
@@ -400,9 +438,10 @@ def execute_response(action: int,
     # real content hash: a path hash or a missing file (e.g. the
     # already-deleted target of a defense-tamper event) must never be
     # published as a threat fingerprint.
-    if (action == config.ACTION_TERMINATE_QUARANTINE and file_hash
-            and not in_store
-            and quarantine_result in ("QUARANTINED", "DRY_RUN_QUARANTINE")):
+    content_hash = event.get("content_hash") or ""
+    if (action == config.ACTION_TERMINATE_QUARANTINE and content_hash
+            and not in_store and not config.DRY_RUN
+            and quarantine_result == "QUARANTINED"):
         # An injected exchange (benchmark / multi-node simulation) is an
         # explicit opt-in and always registers. The canonical store is
         # gated by config.EXCHANGE_ENABLED (tests / single-node offline).
@@ -413,14 +452,14 @@ def execute_response(action: int,
         if store is not None:
             try:
                 rec = store.register(
-                    file_hash,
+                    content_hash,
                     threat_type="ransomware",
                     file_extension=os.path.splitext(file_path)[1].lower(),
                     file_size=event.get("file_size") or 0,
                     evidence=(decision or {}).get("explanation", ""),
                 )
                 log.warning(
-                    f"  [EXCHANGE] fingerprint {file_hash[:12]}… shared "
+                    f"  [EXCHANGE] content hash {content_hash[:12]}… shared "
                     f"(sightings={rec['sightings']}, "
                     f"sources={len(rec['sources'])})"
                 )
@@ -448,8 +487,8 @@ def _kill_record(killed: bool, pid, procname: str,
         return {"pid": pid, "name": procname, "terminated": True,
                 "killed_at": datetime.fromtimestamp(now).isoformat(),
                 "scope": "this file"}
-    if _LAST_KILL and now - _LAST_KILL["time"] <= \
-            config.CAMPAIGN_WINDOW_SECONDS:
+    if (not config.DRY_RUN and _LAST_KILL
+            and now - _LAST_KILL["time"] <= config.CAMPAIGN_WINDOW_SECONDS):
         return {"pid": _LAST_KILL["pid"], "name": _LAST_KILL["name"],
                 "terminated": True,
                 "killed_at": datetime.fromtimestamp(
@@ -594,6 +633,11 @@ class CampaignTracker:
 
     @staticmethod
     def _qualifies(event: dict) -> bool:
+        # A repeated, checkable format-integrity failure can contribute even
+        # when entropy is ordinary; entropy is not a mandatory detector gate.
+        structure = event.get("structure") or {}
+        if event.get("structure_anomaly") or structure.get("anomaly"):
+            return True
         ent = event.get("entropy_overall") or 0.0
         if ent < config.ENTROPY_THRESHOLD:
             return False
@@ -641,8 +685,16 @@ class CampaignTracker:
             return False, [], None
 
         path = os.path.normpath(event.get("file_path") or "")
+        current_structure = event.get("structure") or {}
+        current_anomaly = bool(event.get("structure_anomaly") or current_structure.get("anomaly"))
         others = [e for (_t, p, e, a) in self.entries
-                  if p != path and a >= config.ACTION_ALERT]
+                  if p != path and (
+                      a >= config.ACTION_ALERT or
+                      (current_anomaly and bool(
+                          e.get("structure_anomaly") or
+                          (e.get("structure") or {}).get("anomaly")
+                      ) and (e.get("structure") or {}).get("format") == current_structure.get("format"))
+                  )]
         escalate = (action >= config.ACTION_ALERT
                     and len(others) >= config.CAMPAIGN_MIN_FILES - 1)
 
@@ -655,7 +707,13 @@ class CampaignTracker:
         sweep = []
         seen = set()
         for (_t, p, e, a) in self.entries:
-            if p == path or p in seen or a < config.ACTION_ALERT:
+            prior_structure = e.get("structure") or {}
+            same_structural_campaign = (
+                current_anomaly
+                and bool(e.get("structure_anomaly") or prior_structure.get("anomaly"))
+                and prior_structure.get("format") == current_structure.get("format")
+            )
+            if p == path or p in seen or (a < config.ACTION_ALERT and not same_structural_campaign):
                 continue
             if p in self.swept:
                 continue  # already contained during this campaign
@@ -701,6 +759,8 @@ class DecisionEngine:
         self.campaign = (config.CAMPAIGN_ENABLED
                          if campaign is None else bool(campaign))
         self.campaign_tracker = CampaignTracker()
+        self.risk_engine = RiskEngine()
+        self.behavior_events = deque(maxlen=24)
         self.requested = (engine or config.AI_ENGINE or "auto").lower()
         if self.requested not in ("auto", "rules", "dqn", "rf"):
             log.warning("[DECISION] Unknown ENTROPY_AI_ENGINE %r — "
@@ -764,19 +824,57 @@ class DecisionEngine:
         scenarios; in live operation the rolling window simply ages
         out on its own)."""
         self.campaign_tracker.reset()
+        self.risk_engine.reset()
+        self.behavior_events.clear()
 
     def decide(self, event: dict) -> dict:
         """
-        Return a decision dict compatible with the response layer:
-        { 'action', 'action_name', 'confidence', 'explanation' }
-        plus, when campaign tracking is active, optional keys:
-        { 'sweep_events': [...], 'kill_override': {...}, 'campaign': bool }
+        Separate event scoring from response choice. Risk is an interpretable,
+        uncalibrated evidence index; the rules/campaign layer remains responsible
+        for selecting actions, and only hard confirmation can request containment.
         """
+        event = dict(event)
+        self.behavior_events.append(event)
+        event.setdefault("behavior_fingerprint",
+                         behavioral_fingerprint(self.behavior_events))
+        risk = self.risk_engine.assess(event)
+        event.update(risk)
         decision = self._base_decide(event)
+        action = int(decision.get("action", 0))
+        risk_score = float(risk.get("risk_score") or 0.0)
+        risk_families = risk.get("risk_families") or []
+        behavioral = event.get("behavioral_match") or {}
+        content_evidence = [f for f in risk_families
+                            if f in CONTENT_EVIDENCE_FAMILIES]
+        if (action < config.ACTION_ALERT and risk_score >= 0.75
+                and len(risk_families) >= 2 and content_evidence):
+            action = config.ACTION_ALERT
+            decision["action"] = action
+            decision["action_name"] = ACTION_LABELS[action]
+            decision["explanation"] = (
+                f"Multi-signal risk elevated ({risk_score:.2f}, uncalibrated): "
+                + ", ".join(risk_families)
+            )
+        if isinstance(behavioral, dict) and behavioral.get("confirmed") \
+                and action < config.ACTION_ALERT:
+            action = config.ACTION_ALERT
+            decision["action"] = action
+            decision["action_name"] = ACTION_LABELS[action]
+            decision["explanation"] = (
+                "Behavioural fingerprint corroborated by independent local nodes; "
+                "review required (advisory, not an auto-containment verdict)"
+            )
+        decision.update({
+            "risk_score": risk_score,
+            "risk_label": risk.get("risk_label"),
+            "risk_method": risk.get("risk_method"),
+            "risk_evidence": risk.get("risk_evidence") or [],
+            "risk_families": risk_families,
+            "structure_repeat_count": risk.get("structure_repeat_count", 0),
+        })
         if not self.campaign:
             return decision
 
-        action = int(decision.get("action", 0))
         escalate, sweep, kill_override = (
             self.campaign_tracker.check_and_record(event, action)
         )
@@ -824,7 +922,7 @@ class DecisionEngine:
             return {
                 "action"      : config.ACTION_TERMINATE_QUARANTINE,
                 "action_name" : ACTION_LABELS[config.ACTION_TERMINATE_QUARANTINE],
-                "confidence"  : 1.0,
+                "confidence"  : None,
                 "explanation" : explanation,
                 "q_values"    : None,
                 "engine"      : self.engine_name(),
@@ -900,7 +998,7 @@ class DecisionEngine:
         return {
             "action"      : action,
             "action_name" : ACTION_LABELS.get(action, "UNKNOWN"),
-            "confidence"  : 1.0 if action >= config.ACTION_ALERT else 0.0,
+            "confidence"  : None,
             "explanation" : explanation,
             "q_values"    : None,
             "engine"      : "rules",
@@ -934,6 +1032,16 @@ class PipelineRunner:
 
         # Backup & recovery store
         self.backup = BackupManager()
+
+        # Path-independent operation window and local (not networked) fuzzy
+        # threat-intelligence registry. A match is advisory only.
+        self.behavior_events = deque(maxlen=24)
+        try:
+            self.behavior_exchange = (BehavioralIntelExchange()
+                                      if config.EXCHANGE_ENABLED else None)
+        except Exception as intel_error:
+            self.behavior_exchange = None
+            log.warning("[INTEL] Behavioural registry unavailable: %s", intel_error)
 
         # Stats
         self.stats = {
@@ -1066,6 +1174,21 @@ class PipelineRunner:
                 pass
             return
 
+        # Build a path-independent behavioural signature from the recent
+        # operation sequence. Query local shared intel for corroboration; a
+        # fuzzy hit can raise review risk but never directly contain a file.
+        event = dict(event)
+        self.behavior_events.append(event)
+        event["behavior_fingerprint"] = behavioral_fingerprint(self.behavior_events)
+        if self.behavior_exchange is not None:
+            try:
+                event["behavioral_match"] = self.behavior_exchange.lookup(
+                    event["behavior_fingerprint"]
+                )
+            except Exception as intel_error:
+                log.warning("[INTEL] Behaviour lookup failed: %s", intel_error)
+                event["behavioral_match"] = {"matched": False, "confirmed": False}
+
         # ── Capture the current file state for recovery ──
         # Additive (reads the file, writes only to backup_storage/),
         # so it runs in every mode. Clean versions (entropy below
@@ -1129,6 +1252,22 @@ class PipelineRunner:
         status = execute_response(
             action, event, self.bc, self.db, decision, backup=self.backup
         )
+        # Only publish behavioural evidence after a real quarantine succeeded.
+        # Dry-run outcomes and failed/partial response attempts are not intel.
+        if (action == config.ACTION_TERMINATE_QUARANTINE
+                and not config.DRY_RUN
+                and isinstance(status, str)
+                and status.startswith("QUARANTINED")
+                and self.behavior_exchange is not None
+                and event.get("behavior_fingerprint")):
+            try:
+                self.behavior_exchange.register(
+                    event["behavior_fingerprint"],
+                    evidence=decision.get("explanation", ""),
+                    event_count=len(self.behavior_events),
+                )
+            except Exception as intel_error:
+                log.warning("[INTEL] Behaviour registration failed: %s", intel_error)
 
         # ── Campaign sweep ───────────────────────────
         # Quarantine + restore the remaining campaign files the
@@ -1332,7 +1471,12 @@ class PipelineRunner:
         self.pipeline.stop()
         # Give queued ledger writes a chance to complete before the runner
         # exits. This prevents daemon-thread writes from being silently lost.
-        self.bc.flush(timeout=10.0)
+        self.bc.close(timeout=10.0)
+        if self.behavior_exchange is not None:
+            try:
+                self.behavior_exchange.close()
+            except Exception:
+                pass
         log.info("[RUNNER] Stopped.")
 
     def print_stats(self):

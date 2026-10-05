@@ -248,12 +248,31 @@ def make_pdf_content():
         + b"\n%%EOF\n"
     )
     return output
-def make_binary_content(size_kb):
-    """Create fake image/zip content — realistic file structure"""
-    # Simple structured pattern (like real files have headers)
-    header = b'\x89PNG\r\n\x1a\n' + b'\x00' * 8
-    body = bytes([i % 128 for i in range(size_kb * 1024)])
-    return header + body
+def _png_chunk(kind, payload):
+    return (struct.pack(">I", len(payload)) + kind + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff))
+
+
+def make_png_content(size_kb):
+    """Create a structurally valid PNG fixture with seeded noisy pixels."""
+    width = 128
+    height = max(1, (size_kb * 1024) // (width * 3))
+    height = min(height, 4096)
+    raw = b"".join(b"\x00" + bytes(random.getrandbits(8) for _ in range(width * 3))
+                    for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr)
+            + _png_chunk(b"IDAT", zlib.compress(raw, level=1))
+            + _png_chunk(b"IEND", b""))
+
+
+def make_zip_content(size_kb):
+    """Create a real ZIP fixture (the payload is inert synthetic bytes)."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        payload = bytes(random.getrandbits(8) for _ in range(size_kb * 1024))
+        archive.writestr("demo-payload.bin", payload)
+    return output.getvalue()
 # ═══════════════════════════════════════════════════
 # FILE CREATION
 # ═══════════════════════════════════════════════════
@@ -269,14 +288,14 @@ FILES = {
     "Downloads": [
         ("Invoice_INV-2024-1042.pdf",   "binary", make_pdf_content),
         ("Invoice_INV-2024-1043.pdf",   "binary", make_pdf_content),
-        ("Software_Update.zip",         "binary", lambda: make_binary_content(150)),
+        ("Software_Update.zip",         "binary", lambda: make_zip_content(150)),
         ("Report_Draft.docx",           "text", make_client_notes),
     ],
     "Pictures": [
-        ("Family_Vacation_2023.jpg",    "binary", lambda: make_binary_content(200)),
-        ("Wedding_Photos.jpg",          "binary", lambda: make_binary_content(300)),
-        ("Birthday_Party.jpg",          "binary", lambda: make_binary_content(180)),
-        ("Beach_Trip.jpg",              "binary", lambda: make_binary_content(220)),
+        ("Family_Vacation_2023.png",    "binary", lambda: make_png_content(200)),
+        ("Wedding_Photos.png",          "binary", lambda: make_png_content(300)),
+        ("Birthday_Party.png",          "binary", lambda: make_png_content(180)),
+        ("Beach_Trip.png",              "binary", lambda: make_png_content(220)),
     ],
     "Desktop": [
         ("Passwords.txt",               "text", make_passwords),

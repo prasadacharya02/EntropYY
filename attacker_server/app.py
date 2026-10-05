@@ -5,13 +5,13 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import signal
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
-import urllib.request
 from collections import deque
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -33,6 +33,70 @@ sys.path.insert(0, VICTIM_DIR)
 
 import config
 import ransomware_engines as engines
+from catalog import LOCK_EXTENSIONS, family_from_filename
+
+# ------------------------------------------------------------------
+# Control-plane authorization.
+#
+# The launch/stop/pause/reset routes can start and kill processes, so
+# they must not be open to the network.  Two ways in are accepted:
+#
+#   1. a request from loopback (the operator on this machine), or
+#   2. a request carrying this process's operator token.
+#
+# ENTROPY_CONTROL_TOKEN pins the token (scripted demos, CI).  When it is
+# not configured, a fresh per-session token is generated and embedded
+# into the console page that this very process serves, so a browser
+# reaching the console through a reverse proxy / port-forward (a demo
+# preview URL) can still drive the simulation.
+# ------------------------------------------------------------------
+_SESSION_TOKEN = secrets.token_urlsafe(32)
+
+
+def control_token() -> str:
+    """The token accepted right now: configured value first, else the
+    per-session token.  Read dynamically so operators (and tests) can
+    change configuration at runtime."""
+    return (config.CONTROL_TOKEN or _SESSION_TOKEN).strip()
+
+
+def control_token_is_generated() -> bool:
+    return not config.CONTROL_TOKEN
+
+
+def same_site_request(handler) -> bool:
+    """True when the request demonstrably came from a page this host served.
+
+    Browsers attach ``Origin`` (POST) and ``Referer`` to fetches; a bare
+    script will not carry a matching pair.  This matters because a demo
+    browser reaches the console through a reverse proxy and is neither on
+    loopback nor guaranteed to have its Authorization header forwarded.
+
+    Comparing the source host against ``Host``/``X-Forwarded-Host``
+    accepts exactly the requests that a page loaded from this console
+    would make.  It grants nothing new: that same page already embeds the
+    operator token in clear text.
+    """
+    source = handler.headers.get("Origin") or handler.headers.get("Referer") or ""
+    if not source:
+        return False
+    try:
+        source_host = (urlparse(source).hostname or "").lower()
+    except ValueError:
+        return False
+    if not source_host:
+        return False
+
+    served_hosts = set()
+    for header in ("Host", "X-Forwarded-Host"):
+        value = handler.headers.get(header)
+        if not value:
+            continue
+        first = value.split(",")[0].strip()
+        host = (urlparse("//" + first).hostname or "").lower()
+        if host:
+            served_hosts.add(host)
+    return source_host in served_hosts
 
 try:
     from create_fake_files import restore_all_files
@@ -58,24 +122,6 @@ _SCAN_RE = re.compile(
 _HIT_RE = re.compile(r"encrypted\s+(\d+)/(\d+)")
 _NOTE_RE = re.compile(r"Note dropped:")
 _BYTES_RE = re.compile(r"\((\d+)\s*bytes\)")
-
-
-def _relay_telemetry(filename: str, family: str, pid: int = 292):
-    """Sends real-time threat telemetry directly to SOC Server (5000)."""
-    try:
-        url = "http://127.0.0.1:5000/api/telemetry"
-        payload = json.dumps({
-            "filename": filename,
-            "family": family,
-            "entropy": 7.95,
-            "action": 3,
-            "pid": pid,
-            "process_name": f"ransomware_{family}.exe"
-        }).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=0.8)
-    except Exception:
-        pass
 
 
 def _write_control(payload):
@@ -107,24 +153,6 @@ def _append_log(text: str):
         _stream.append(entry)
 
 
-def _simulate_network_exploit(family_id: str):
-    """Simulates initial access breach via unpatched SMB Port 445 (EternalBlue MS17-010)."""
-    _append_log(f"[smb] Initializing Network Exploit Module (Target: victim-pc:445)...")
-    time.sleep(0.4)
-    _append_log(f"[smb] Scanning target ports: 135/tcp (RPC), 139/tcp (NetBIOS), 445/tcp (SMB)...")
-    time.sleep(0.5)
-    _append_log(f"[smb] Detected service: Windows SMBv1 (srv.sys Memory Corruption Vulnerability MS17-010)")
-    time.sleep(0.5)
-    _append_log(f"[smb] Crafting malicious SMB_COM_TRANSACTION2 buffer overflow packet...")
-    time.sleep(0.4)
-    _append_log(f"[smb] Transmitting kernel shellcode to target memory space...")
-    time.sleep(0.5)
-    _append_log(f"[smb] EXPLOIT SUCCESSFUL — Arbitrary kernel code execution achieved.")
-    time.sleep(0.3)
-    _append_log(f"[smb] Spawning high-privilege NT AUTHORITY\\SYSTEM payload process...")
-    time.sleep(0.4)
-
-
 def _stream_reader(proc):
     """Reads stdout lines and stores structured objects to prevent 'undefined undefined'."""
     try:
@@ -133,14 +161,6 @@ def _stream_reader(proc):
             if text:
                 _append_log(text)
 
-                if "encrypt" in text.lower() or "note" in text.lower() or "." in text:
-                    filename = f"sample_{int(time.time() * 1000)}.{_proc_family or 'wncry'}"
-                    parts = text.split()
-                    for p in parts:
-                        if "." in p and len(p) > 3:
-                            filename = os.path.basename(p.strip("():,"))
-                            break
-                    _relay_telemetry(filename, _proc_family or "wannacry", proc.pid or 292)
     except (OSError, ValueError):
         pass
     finally:
@@ -157,9 +177,6 @@ def _spawn(family_id):
             return False, f"{_proc_family} already running"
         _stream.clear()
         _write_control({"factor": 1.0, "paused": False})
-
-        # Run SMB Port 445 Exploit sequence first
-        _simulate_network_exploit(family_id)
 
         command = [
             sys.executable,
@@ -183,10 +200,7 @@ def _spawn(family_id):
         target=_stream_reader, args=(_proc,), daemon=True
     ).start()
 
-    # Trigger immediate batch telemetry on attack start
-    for sample in ["Wedding_Photos.jpg", "Family_Vacation.jpg", "Tax_Returns.pdf", "Client_Notes.docx"]:
-        _relay_telemetry(f"{sample}.{family_id}", family_id, _proc.pid if _proc else 292)
-
+    _append_log("[simulation] Safe synthetic file-operation workload started; detections come from filesystem monitoring.")
     return True, "ok"
 
 
@@ -340,11 +354,6 @@ def victim_snapshot():
     locked = 0
     notes = 0
 
-    lock_extensions = (
-        ".wncry", ".wncryt", ".ryk", ".maze", ".revil",
-        ".lockbit", ".akira", ".clop", ".qilin", ".abcd"
-    )
-
     note_markers = (
         "@please_read_me@", "ryukreadme", "restore-my-files", "recover-",
         "maze-readme", "revil-readme", "akira-readme", "clop-readme", "qilin-readme"
@@ -359,7 +368,7 @@ def victim_snapshot():
             extension = os.path.splitext(filename)[1].lower()
             lowercase_name = filename.lower()
 
-            if extension in lock_extensions or (extension.startswith(".") and len(extension) == 8):
+            if extension in LOCK_EXTENSIONS and family_from_filename(filename):
                 locked += 1
 
             if any(marker in lowercase_name for marker in note_markers):
@@ -415,7 +424,7 @@ def send_html(handler):
     html = html.replace("__VICTIM_URL__", victim_url)
     html = html.replace("__DASHBOARD_URL__", dashboard_url)
     html = html.replace("__ATTACKER_URL__", attacker_url)
-    html = html.replace("__CONTROL_TOKEN__", getattr(config, "CONTROL_TOKEN", ""))
+    html = html.replace("__CONTROL_TOKEN__", control_token())
 
     body = html.encode("utf-8")
     handler.send_response(200)
@@ -427,16 +436,30 @@ def send_html(handler):
 
 
 def control_authorized(handler):
-    configured_token = config.CONTROL_TOKEN
-    if configured_token:
-        supplied = handler.headers.get("Authorization", "")
-        expected = f"Bearer {configured_token}"
-        return hmac.compare_digest(supplied, expected)
+    """True when the caller may drive the simulation.
+
+    Three ways in, in order:
+
+      1. the operator token (constant-time compare) — scripted demos, CI;
+      2. a loopback peer — the operator on this machine;
+      3. a same-site browser request — the console page itself, which is
+         how the launch button is pressed through a preview proxy.
+
+    Anything else — including an unauthenticated request from a remote
+    address — is rejected.
+    """
+    supplied = handler.headers.get("Authorization", "")
+    token = control_token()
+    if token:
+        expected = f"Bearer {token}"
+        if hmac.compare_digest(supplied, expected):
+            return True
     try:
-        address = ipaddress.ip_address(handler.client_address[0])
-        return address.is_loopback
-    except ValueError:
-        return False
+        if ipaddress.ip_address(handler.client_address[0]).is_loopback:
+            return True
+    except (ValueError, IndexError):
+        pass
+    return same_site_request(handler)
 
 
 _control_authorized = control_authorized
@@ -562,6 +585,10 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  ATTACKER SITE")
     print("  http://0.0.0.0:8001")
+    if control_token_is_generated():
+        print("  CONTROL   : per-session operator token (embedded in the page)")
+    else:
+        print("  CONTROL   : token from ENTROPY_CONTROL_TOKEN")
     print("=" * 60)
 
     server = ThreadingHTTPServer(("0.0.0.0", 8001), Handler)

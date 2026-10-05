@@ -51,15 +51,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
+from blockchain.behavioral_exchange import BehavioralIntelExchange
 from blockchain.fingerprint_exchange import FingerprintExchange
 from entropy.entropy_calculator import EntropyAnalyzer
+from fingerprint.behavioral import behavioral_fingerprint, hamming_distance
 from monitoring.defense_guard import collect_threat_flags
 from monitoring.pipeline_runner import (DecisionEngine, execute_response)
+from storage.database import _EVENTS_SCHEMA, _ensure_events_columns
 
 ACTION_NAMES = {0: "IGNORE", 1: "ALERT", 2: "TERMINATE", 3: "QUARANTINE"}
 
-# Deterministic "encrypted" payload — the same bytes on every node,
-# so its SHA-256 is the cross-node identity of the strain.
+# Every tenant generates its OWN ciphertext. This models the real world:
+# a fresh IV/nonce per file per victim means ciphertext bytes never repeat,
+# so an exact content hash cannot identify a shared strain. Deterministic
+# per tenant for reproducibility.
 PAYLOAD_SEED = 42
 PAYLOAD_SIZE = 65536
 
@@ -74,8 +79,8 @@ CLEAN_TEXT = (
 ) * 12
 
 
-def payload_bytes() -> bytes:
-    return random.Random(PAYLOAD_SEED).randbytes(PAYLOAD_SIZE)
+def payload_bytes(tenant_seed: int = PAYLOAD_SEED) -> bytes:
+    return random.Random(tenant_seed).randbytes(PAYLOAD_SIZE)
 
 
 class _BcStub:
@@ -88,19 +93,12 @@ class _BcStub:
 
 
 def _make_events_db() -> sqlite3.Connection:
-    """A throwaway events DB so execute_response's record-every-decision
-    path runs exactly as in production (no 'NoneType' save errors)."""
+    """A throwaway events DB using the product schema so execute_response's
+    record-every-decision path runs exactly as in production."""
     conn = sqlite3.connect(":memory:")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT,
-            file_path TEXT, event_type TEXT, entropy REAL,
-            entropy_delta REAL, pid INTEGER, process_name TEXT,
-            action INTEGER, status TEXT, requested_action INTEGER,
-            outcome TEXT, restore_result TEXT, dry_run INTEGER,
-            engine TEXT, confidence REAL, explanation TEXT, q_values TEXT
-        )
-    """)
+    conn.row_factory = sqlite3.Row
+    conn.execute(_EVENTS_SCHEMA)
+    _ensure_events_columns(conn)
     conn.commit()
     return conn
 
@@ -120,14 +118,22 @@ class Tenant:
 
     def __init__(self, node_id: str, exchange: FingerprintExchange,
                  victim_root: Path, engine: DecisionEngine,
-                 events_db=None):
+                 events_db=None, behavioral=None, payload_seed: int = PAYLOAD_SEED):
         self.node_id = node_id
         self.exchange = exchange
+        self.behavioral = behavioral
+        self.payload_seed = payload_seed
         self.root = victim_root
         self.analyzer = EntropyAnalyzer()   # local history = local state
         self.engine = engine
         self.events_db = events_db
         self.ops = []
+        self.sequence = []        # local operation window for fingerprinting
+        self.fingerprint = ""
+
+    def payload(self) -> bytes:
+        """This tenant's own ciphertext (never byte-identical to another's)."""
+        return payload_bytes(self.payload_seed)
 
     def lay(self, files: list[tuple[str, bytes]]) -> None:
         """(Re)create this tenant's victim estate."""
@@ -144,11 +150,18 @@ class Tenant:
         for rel in rel_paths:
             self.analyzer.analyze(str(self.root / rel))
 
-    def process(self, rel: str, event_type: str) -> dict:
-        """Run one file event through the real decision + response
-        chain (dry-run) and record the outcome."""
+    def process(self, rel: str, event_type: str,
+                original_rel: str | None = None) -> dict:
+        """Run one file event through the real decision + response chain and
+        record the outcome. Mirrors the live monitor's event vocabulary,
+        including the extension-change flag a rename produces."""
         path = self.root / rel
         result = self.analyzer.analyze(str(path))
+        ext_changed = False
+        if event_type == "RENAMED" and original_rel:
+            _, source_ext = os.path.splitext(original_rel)
+            _, dest_ext = os.path.splitext(rel)
+            ext_changed = source_ext.lower() != dest_ext.lower()
         event = {
             "event_id": f"{self.node_id}-{rel}",
             "timestamp": datetime.now().isoformat(),
@@ -157,14 +170,22 @@ class Tenant:
             "file_extension": result.get("file_extension", ""),
             "file_size": result.get("file_size", 0),
             "file_hash": result.get("file_hash", ""),
+            "content_hash": result.get("content_hash"),
             "entropy_overall": result.get("entropy_overall", 0.0),
             "entropy_delta": result.get("entropy_delta", 0.0),
             "threat_score": result.get("threat_score", 0.0),
             "events_per_sec": 0.0,
             "is_suspicious_speed": False,
-            "ext_changed": False,
+            "ext_changed": ext_changed,
+            "original_path": (str(self.root / original_rel)
+                              if original_rel else None),
             "process": {},
         }
+        self.sequence.append(dict(event))
+        self.fingerprint = behavioral_fingerprint(self.sequence)
+        event["behavior_fingerprint"] = self.fingerprint
+        if self.behavioral is not None:
+            event["behavioral_match"] = self.behavioral.lookup(self.fingerprint)
         event.update(collect_threat_flags(event, exchange=self.exchange))
         decision = self.engine.decide(event)
         action = decision["action"]
@@ -172,6 +193,22 @@ class Tenant:
             action, event, _BcStub(), self.events_db, decision,
             backup=None, exchange=self.exchange,
         )
+        # Publish behavioural evidence only for a real, contained incident —
+        # the same rule the live pipeline applies.
+        if (self.behavioral is not None
+                and int(action) == config.ACTION_TERMINATE_QUARANTINE
+                and not config.DRY_RUN
+                and isinstance(outcome, str)
+                and outcome.startswith("QUARANTINED")
+                and self.fingerprint):
+            try:
+                self.behavioral.register(
+                    self.fingerprint,
+                    evidence=decision.get("explanation", ""),
+                    event_count=len(self.sequence),
+                )
+            except Exception:
+                pass
         rec = {
             "node": self.node_id,
             "file": rel,
@@ -182,6 +219,10 @@ class Tenant:
             "known_threat_confirmed": bool(
                 event.get("known_threat_confirmed")
             ),
+            "content_hash": event.get("content_hash"),
+            "behavior_fingerprint": self.fingerprint,
+            "behavioral_match": event.get("behavioral_match") or {},
+            "risk_score": round(float(decision.get("risk_score") or 0.0), 4),
             "action": action,
             "action_name": ACTION_NAMES[action],
             "outcome": outcome,
@@ -202,44 +243,67 @@ def run_simulation(base_dir: str | None = None) -> dict:
 
     # One shared exchange — the "network" all tenants see.
     shared_db = base / "exchange.db"
-    engine = _engine()
+    # Shared registry with a neutral observation identity for summary/metrics.
+    behavioural = BehavioralIntelExchange(str(shared_db), node_id="observer")
     tenants = {}
-    for name in ("tenant-alpha", "tenant-bravo", "tenant-charlie",
-                 "tenant-delta"):
+    for index, name in enumerate(("tenant-alpha", "tenant-bravo",
+                                  "tenant-charlie", "tenant-delta")):
         tenants[name] = Tenant(
             name,
             FingerprintExchange(str(shared_db), node_id=name),
             base / f"victim_{name}",
-            engine,
+            _engine(),
             events_db=_make_events_db(),
+            # Each host gets its OWN view (node identity) over the shared
+            # registry. A single shared instance would report one node id for
+            # every host, making independent corroboration impossible.
+            behavioral=BehavioralIntelExchange(str(shared_db), node_id=name),
+            payload_seed=PAYLOAD_SEED + index,
         )
     alpha, bravo, charlie, delta = (
         tenants["tenant-alpha"], tenants["tenant-bravo"],
         tenants["tenant-charlie"], tenants["tenant-delta"],
     )
 
-    payload = payload_bytes()
     budget_rel = "Documents/budget_2026.qrx"
     note_rel = "Documents/Restore-My-Files.txt"
     phases: list[dict] = []
 
-    def strain_run(tenant: Tenant) -> None:
-        """The known strain: ransom note + in-place encryption of the
-        budget file (baseline available, so the delta confirms)."""
-        tenant.lay([(budget_rel, CLEAN_TEXT)])
-        tenant.baseline([budget_rel])
-        (tenant.root / note_rel).parent.mkdir(parents=True, exist_ok=True)
-        (tenant.root / note_rel).write_bytes(NOTE_BYTES)
-        tenant.process(note_rel, "CREATED")
-        (tenant.root / budget_rel).write_bytes(payload)
-        tenant.process(budget_rel, "MODIFIED")
+    STRAIN_FILES = ["Documents/budget_2026.qrx",
+                    "Documents/financials_q3.qrx",
+                    "Documents/hr_records.qrx"]
+
+    def strain_run(tenant: Tenant, *, note: bool = False,
+                   files: int = 3) -> dict:
+        """The shared strain's observable behaviour: encrypt each target in
+        place and rename it to the campaign extension, walking the directory
+        in order. Every host produces its OWN ciphertext bytes.
+
+        ``note`` adds the ransom note (the one artefact that IS byte-identical
+        across hosts, which is why an exact hash can still identify it)."""
+        tenant.lay([])
+        last = None
+        if note:
+            (tenant.root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (tenant.root / note_rel).write_bytes(NOTE_BYTES)
+            last = tenant.process(note_rel, "CREATED")
+        for rel in STRAIN_FILES[:files]:
+            path = tenant.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(tenant.payload())      # encrypt in place
+            tenant.process(rel, "MODIFIED")
+            renamed = path.with_suffix(path.suffix + ".lock")
+            path.replace(renamed)                    # then disguise
+            last = tenant.process(str(renamed.relative_to(tenant.root)),
+                                  "RENAMED", original_rel=rel)
+        return last
 
     def ambiguous_run(tenant: Tenant) -> dict:
         """Locally ambiguous: the payload alone, no note, no baseline,
         no history for this file on this node."""
         tenant.lay([])
         (tenant.root / "Documents").mkdir(parents=True, exist_ok=True)
-        (tenant.root / "Documents/financials_q3.qrx").write_bytes(payload)
+        (tenant.root / "Documents/financials_q3.qrx").write_bytes(tenant.payload())
         return tenant.process("Documents/financials_q3.qrx", "CREATED")
 
     # Keep execute_response's side effects (forensic reports, quarantined
@@ -269,7 +333,7 @@ def run_simulation(base_dir: str | None = None) -> dict:
         })
 
         # ── Phase 2: tenant A seeds the strain ──────────────
-        strain_run(alpha)
+        strain_run(alpha, note=True)
         phases.append({
             "phase": "2_seeding_alpha",
             "tenant": alpha.node_id,
@@ -285,15 +349,15 @@ def run_simulation(base_dir: str | None = None) -> dict:
         })
 
         # ── Phase 4: tenant B seeds the same strain ─────────
-        strain_run(bravo)
+        strain_run(bravo, note=True)
         phases.append({
             "phase": "4_seeding_bravo",
             "tenant": bravo.node_id,
             "ops": bravo.ops[-2:],
         })
 
-        # ── Phase 5: tenant C — warm start ──────────────────
-        warm = ambiguous_run(charlie)
+        # ── Phase 5: tenant C — warm start, realistic encounter ──
+        warm = strain_run(charlie, note=False)
         phases.append({
             "phase": "5_warm_start",
             "tenant": charlie.node_id,
@@ -335,6 +399,57 @@ def run_simulation(base_dir: str | None = None) -> dict:
         })
     store.close()
 
+    # ── Randomisation-invariance evidence ────────────────────
+    # Every tenant encrypted with its own ciphertext. Exact content hashes
+    # therefore cannot identify a shared strain across nodes; the behavioural
+    # signature is what actually correlates.
+    strain_hashes = {}
+    for phase in phases:
+        if phase["phase"] == "2_seeding_alpha":
+            strain_hashes["alpha"] = [
+                op.get("content_hash") for op in phase.get("ops", [])
+            ]
+        if phase["phase"] == "4_seeding_bravo":
+            strain_hashes["bravo"] = [
+                op.get("content_hash") for op in phase.get("ops", [])
+            ]
+    alpha_hashes = {h for h in strain_hashes.get("alpha", []) if h}
+    bravo_hashes = {h for h in strain_hashes.get("bravo", []) if h}
+    cross_node_exact_matches = len(alpha_hashes & bravo_hashes)
+    behavioural_stats = behavioural.stats()
+    for tenant in tenants.values():
+        try:
+            tenant.behavioral.close()
+        except Exception:
+            pass
+    warm_match = (phases[4]["result"].get("behavioral_match") or {})
+    # Separation evidence: distance from the strain cluster to the shared
+    # strain, versus to a legitimate backup workload on the same host.
+    def _final_fp(phase_name: str) -> str:
+        for phase in phases:
+            if phase["phase"] != phase_name:
+                continue
+            ops = phase.get("ops") or ([phase["result"]] if phase.get("result") else [])
+            if ops:
+                return ops[-1].get("behavior_fingerprint") or ""
+        return ""
+
+    strain_fp = _final_fp("2_seeding_alpha")
+    encounter_fp = _final_fp("5_warm_start")
+    workload_fp = _final_fp("6_workload_honesty")
+    separation = {
+        "strain_vs_other_host_same_strain": (
+            hamming_distance(strain_fp, _final_fp("4_seeding_bravo"))
+            if strain_fp and _final_fp("4_seeding_bravo") else None),
+        "strain_vs_second_host_encounter": (
+            hamming_distance(strain_fp, encounter_fp)
+            if strain_fp and encounter_fp else None),
+        "strain_vs_legitimate_backup_workload": (
+            hamming_distance(strain_fp, workload_fp)
+            if strain_fp and workload_fp else None),
+        "max_match_distance": behavioural.max_distance,
+    }
+    cold_ops = [op for op in (phases[0]["result"],) if op]
     payload_fp = hashlib.sha256(payload_bytes()).hexdigest()
 
     # Known-threat metrics at first sight. A "first-sight encounter" is a
@@ -374,9 +489,17 @@ def run_simulation(base_dir: str | None = None) -> dict:
         if restraint_encounters else 0.0
     )
 
+    behavioural.close()
     report = {
         "generated": datetime.now().isoformat(),
         "exchange_db": str(shared_db),
+        "honest_note": (
+            "Each tenant encrypted with independently randomised ciphertext. "
+            "Exact content hashes are expected to match across nodes ZERO "
+            "times; cross-node correlation is carried by the behavioural "
+            "fingerprint. The behavioural registry is a shared local SQLite "
+            "file, not a network."
+        ),
         "confirm_threshold": config.EXCHANGE_CONFIRM_THRESHOLD,
         "phases": phases,
         "exchange_records": records,
@@ -392,21 +515,46 @@ def run_simulation(base_dir: str | None = None) -> dict:
             "single_sighting_restraint_pct": restraint_pct,
             "workload_false_positives": workload_false_positives,
             "workload_runs": workload_runs,
+            "exact_hash_cross_node_matches": cross_node_exact_matches,
+            "alpha_distinct_content_hashes": len(alpha_hashes),
+            "bravo_distinct_content_hashes": len(bravo_hashes),
+            "behavioral_registry": behavioural_stats,
+            "warm_start_behavioral_distance": warm_match.get("distance"),
+            "warm_start_behavioral_confirmed": bool(warm_match.get("confirmed")),
+            "behavioral_separation": separation,
         },
         "headline": {
-            "cold_start_action": cold["action_name"],
-            "single_sighting_action": single["action_name"],
-            "single_sighting_corroborated": single["known_threat"],
-            "warm_start_action": warm["action_name"],
-            "warm_start_confirmed": warm["known_threat_confirmed"],
-            "warm_start_explanation": warm["explanation"],
+            # Two independent channels, reported separately because they have
+            # different failure modes. Exact content hashes cannot identify
+            # randomised ciphertext across hosts; behavioural signatures can.
+            "exact_hash_channel": {
+                "cold_start_action": cold["action_name"],
+                "single_sighting_action": single["action_name"],
+                "single_sighting_corroborated": single["known_threat"],
+                "warm_start_exact_hash_confirmed":
+                    bool(phases[4]["result"].get("known_threat_confirmed")),
+                "cross_node_hash_matches_for_ciphertext":
+                    cross_node_exact_matches,
+                "note": ("Ransom notes are byte-identical across hosts and do "
+                         "match by hash; the encrypted payloads never do."),
+            },
+            "behavioural_channel": {
+                "warm_start_action": warm["action_name"],
+                "warm_start_behavioral_matched":
+                    bool(warm_match.get("matched")),
+                "warm_start_behavioral_confirmed":
+                    bool(warm_match.get("confirmed")),
+                "warm_start_distance": warm_match.get("distance"),
+                "cluster_sources": warm_match.get("sources"),
+                "separation": separation,
+            },
             "workload_max_action": max(
-                o["action"] for o in workload_ops
-            ),
+                (op["action_name"] for op in
+                 (phases[5].get("ops") or [])), default="NONE"),
             "workload_added_exchange_records": (
-                charlie.exchange.count() - count_before
-            ),
-        },
+                phases[5]["exchange_count_after"]
+                - phases[5]["exchange_count_before"]),
+        }
     }
     for tenant in tenants.values():
         tenant.exchange.close()

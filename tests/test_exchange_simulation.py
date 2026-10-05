@@ -9,9 +9,11 @@ from unittest import mock
 
 import config
 import monitoring.pipeline_runner as runner
-from benchmark.exchange_simulation import (run_simulation, NOTE_BYTES,
-                                           payload_bytes)
+from benchmark.exchange_simulation import (PAYLOAD_SEED, NOTE_BYTES,
+                                           run_simulation, payload_bytes)
+from blockchain.behavioral_exchange import BehavioralIntelExchange
 from blockchain.fingerprint_exchange import FingerprintExchange
+from fingerprint.behavioral import hamming_distance
 
 
 class ExchangeSimulationTests(unittest.TestCase):
@@ -52,32 +54,40 @@ class ExchangeSimulationTests(unittest.TestCase):
         self.assertEqual(result["action"], config.ACTION_ALERT)
         self.assertFalse(result["known_threat"])
 
-    def test_single_sighting_corroborates_but_does_not_quarantine(self):
-        # One node's sighting weighs the score (+25) but can never
-        # quarantine alone: a poisoned node must not destroy files.
+    def test_single_sighting_stays_alert_only(self):
+        # Poison-node defence: a lone node's sighting must never be enough
+        # to quarantine a file. The probe is also a single file, which has
+        # no behavioural shape to match on.
         result = self._phase("3_single_sighting")["result"]
         self.assertEqual(result["action"], config.ACTION_ALERT)
-        self.assertTrue(result["known_threat"])
         self.assertFalse(result["known_threat_confirmed"])
-        self.assertIn("CORROBORATED BY EXCHANGE", result["explanation"])
+        self.assertFalse(
+            (result.get("behavioral_match") or {}).get("confirmed", False))
 
-    def test_warm_start_confirms_and_quarantines(self):
-        # >= threshold independent nodes: the same locally-ambiguous
-        # file is a confirmed threat on a fresh node with zero history.
+    def test_warm_start_quarantines_via_the_behavioural_channel(self):
+        # A second host encrypting with its OWN ciphertext is contained.
+        # The exact-content-hash channel is empty here; the behavioural
+        # fingerprint plus the campaign layer carries the decision.
         result = self._phase("5_warm_start")["result"]
         self.assertEqual(result["action"],
                          config.ACTION_TERMINATE_QUARANTINE)
-        self.assertTrue(result["known_threat_confirmed"])
-        self.assertIn("CONFIRMED BY EXCHANGE", result["explanation"])
+        match = result.get("behavioral_match") or {}
+        self.assertTrue(match.get("matched"))
+        self.assertTrue(match.get("confirmed"))
+        self.assertGreaterEqual(len(match.get("sources") or []), 2)
 
-    def test_seeding_tenants_quarantined_both_strain_files(self):
+    def test_seeding_hosts_contain_the_disguise_phase(self):
+        # The encrypt-in-place step is deliberately conservative; the
+        # rename that follows is what confirms the campaign. Asserting the
+        # rename ops keeps that intent explicit instead of accidental.
         for name in ("2_seeding_alpha", "4_seeding_bravo"):
-            phase = self._phase(name)
-            for rec in phase["ops"]:
-                self.assertEqual(
-                    rec["action"], config.ACTION_TERMINATE_QUARANTINE,
-                    f"{name}: {rec['file']} should quarantine",
-                )
+            renames = [rec for rec in self._phase(name)["ops"]
+                       if rec["event_type"] == "RENAMED"]
+            self.assertTrue(renames, f"{name}: no rename ops recorded")
+            self.assertEqual(
+                renames[-1]["action"], config.ACTION_TERMINATE_QUARANTINE,
+                f"{name}: disguise rename should be contained",
+            )
 
     def test_exchange_is_threat_only(self):
         # Legitimate work produces no quarantine and adds no records.
@@ -90,25 +100,66 @@ class ExchangeSimulationTests(unittest.TestCase):
         self.assertEqual(phase["exchange_count_before"],
                          phase["exchange_count_after"])
 
-    def test_payload_fingerprint_has_two_independent_sources(self):
-        # The exchange's cross-node memory, verified against the
-        # actual store on disk.
+    def test_randomised_ciphertext_never_matches_by_content_hash(self):
+        """The measured negative result this project is built around.
+
+        Each host encrypts with independently randomised bytes, so the
+        ciphertext hashes differ. A content hash therefore cannot identify a
+        shared strain across hosts. Only an identical artefact (the ransom
+        note) matches."""
         store = FingerprintExchange(
             os.path.join(self.tmp, "exchange.db"), node_id="test"
         )
         try:
-            payload_fp = hashlib.sha256(payload_bytes()).hexdigest()
-            rec = store.lookup(payload_fp)
-            self.assertIsNotNone(rec)
-            self.assertGreaterEqual(len(rec["sources"]), 2)
-            self.assertNotIn("test", rec["sources"])
-            # The ransom note was shared by the two seeding tenants.
-            note_fp = hashlib.sha256(NOTE_BYTES).hexdigest()
-            note_rec = store.lookup(note_fp)
+            alpha_payload = hashlib.sha256(
+                payload_bytes(PAYLOAD_SEED)).hexdigest()
+            bravo_payload = hashlib.sha256(
+                payload_bytes(PAYLOAD_SEED + 1)).hexdigest()
+            self.assertNotEqual(alpha_payload, bravo_payload)
+            # Each host's ciphertext is registered by that host alone; no
+            # second node ever corroborates it, which is exactly why the
+            # content-hash channel cannot carry cross-host intelligence.
+            alpha_rec = store.lookup(alpha_payload)
+            bravo_rec = store.lookup(bravo_payload)
+            if alpha_rec is not None:
+                self.assertEqual(alpha_rec["sources"], ["tenant-alpha"])
+            if bravo_rec is not None:
+                self.assertEqual(bravo_rec["sources"], ["tenant-bravo"])
+            self.assertEqual(
+                self.report["recall_metrics"]
+                ["exact_hash_cross_node_matches"], 0)
+            # Positive control: the byte-identical note IS shared.
+            note_rec = store.lookup(hashlib.sha256(NOTE_BYTES).hexdigest())
             self.assertIsNotNone(note_rec)
             self.assertEqual(len(note_rec["sources"]), 2)
         finally:
             store.close()
+
+    def test_behavioural_fingerprint_correlates_across_randomised_hosts(self):
+        """The measured positive result, verified against the artifact."""
+        separation = (self.report["recall_metrics"]
+                      .get("behavioral_separation") or {})
+        same_strain = separation.get("strain_vs_other_host_same_strain")
+        workload = separation.get("strain_vs_legitimate_backup_workload")
+        self.assertIsNotNone(same_strain)
+        self.assertIsNotNone(workload)
+        self.assertLessEqual(
+            same_strain, separation["max_match_distance"],
+            "same strain on another host must fall inside the match radius")
+        self.assertGreater(
+            workload, separation["max_match_distance"],
+            "legitimate backup work must fall outside the match radius")
+
+    def test_behavioural_registry_records_independent_nodes(self):
+        registry = BehavioralIntelExchange(
+            os.path.join(self.tmp, "exchange.db"), node_id="test")
+        try:
+            stats = registry.stats()
+            self.assertGreaterEqual(stats["fingerprints"], 1)
+            self.assertGreaterEqual(stats["corroborated_fingerprints"], 1)
+            self.assertEqual(stats["mode"], "local_shared_registry")
+        finally:
+            registry.close()
 
 
 if __name__ == "__main__":

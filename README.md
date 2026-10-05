@@ -4,8 +4,8 @@
 
 > Industry-level, end-to-end working system - No fake claims, no broken demos
 
-[![Tests](https://img.shields.io/badge/tests-126%20pass-brightgreen)]()
-[![Detection](https://img.shields.io/badge/detection-87.5%25%20rules%20%7C%20100%25%20RF-blue)]()
+[![Tests](https://img.shields.io/badge/tests-191%20pass%2C%200%20fail-brightgreen)]()
+[![Detection](https://img.shields.io/badge/detection-48%2F48%20rules%20%7C%200%20false%20quarantines-brightgreen)]()
 [![False Quarantine](https://img.shields.io/badge/false%20quarantine-0-brightgreen)]()
 [![Recovery](https://img.shields.io/badge/recovery-18%2F18%20restored-brightgreen)]()
 
@@ -32,11 +32,22 @@ pip install -r requirements.txt
 python lab.py
 ```
 
+> **Reproducibility note.** `requirements-ci.txt` includes the pinned
+> `scikit-learn` build the test suite needs; the DQN/Web3/SHAP extras stay
+> optional. A clean clone with that file installed runs the whole suite
+> (191 tests, 2 skipped for optional PyTorch).
+
 | Surface | URL | Purpose |
 |---------|-----|---------|
 | SOC Dashboard | http://127.0.0.1:5000 | Real-time feed, entropy graph, alerts |
 | Victim PC | http://127.0.0.1:5001 | Neutral file explorer (This PC) |
 | Attacker Console | http://127.0.0.1:8001 | Launch controlled attacks |
+
+> **Before a demo:** run `python main.py` (health check), then `python lab.py`.
+> Reset the estate with the lab **stopped** (`python victim_server/create_fake_files.py`).
+> The attacker console authenticates control requests with a per-session operator token that is
+> embedded in the page it serves, so the LAUNCH button works through a preview proxy as well as on
+> localhost. Anyone who can load the console page can drive the simulation — fine for a lab.
 
 **Demo Flow for 200 Marks:**
 1. Open Victim (5001) - 18 files, Quarantine 🔒 Locked
@@ -45,6 +56,24 @@ python lab.py
 4. SOC shows: `THREAT` → `CAMPAIGN CONFIRMED` → `KILL` → `QUARANTINE+RESTORED` → `Post-kill verification`
 5. Victim still shows 18 files, 0 .WNCRY
 6. Unlock vault `victim_user / 1234` - see 3 ciphertext evidence files (cannot be decrypted, only forensics)
+
+## 🔁 What Changed in This Revision
+
+The audit and redesign that produced this revision are in `docs/audit/`. In
+short, the following were **fixed rather than described**:
+
+| Was | Now |
+| --- | --- |
+| Demo deadlocked on the first attack click (non-reentrant lock around a re-entrant call) | Fixed; launch is instant and the console answers in ~1 ms |
+| The attacker POSTed fabricated "detections" into the SOC feed | Endpoint removed (410) and the relay deleted |
+| Dashboard invented kills/PIDs/entropy/engine (`25576`, `ryuk`, `7.95`, `"dqn"`, 100% confidence) | Every field is now backed by a persisted value or returns `null` (rendered as "not recorded") |
+| Vault PIN check silently disabled (`return True`) | Real `compare_digest` + session expiry + lockout; 401/403 verified live |
+| "Blockchain" was a plain SQLite table | Hash-chained, verifiable ledger with a live tamper test; still labelled *not* a blockchain |
+| Fingerprint = SHA-256 of ciphertext (never matches across hosts) | Behavioural SimHash measured at Hamming 0 across randomised hosts; content-hash channel kept only for byte-identical artefacts |
+| Entropy was a hard gate | Entropy is one evidence family; format integrity is orthogonal to it |
+| `image_blindspot` 0/6 | 6/6 via format integrity, with its boundary documented |
+| Health reporting fail-open | `online` derived from heartbeat age + PID liveness; returns `null` engine when unknown |
+| Flat threat score labelled like confidence | Uncalibrated risk index, labelled as such, shown with per-signal evidence |
 
 ## 🏗️ Architecture (Industry Level)
 
@@ -75,8 +104,22 @@ SOC Dashboard (socket.io real-time push 0.4s) + Victim Explorer (neutral)
 - **Strict clean labeling** - Event-time captures must be inside normal range AND no ≥2.0 entropy jump from last clean, so office ciphertext never becomes restore source
 - **Content-based post-kill verification** - After kill, walk estate, compare hash vs last clean, repair mid-write files. No entropy-only false positives on jpgs
 - **Self-kill safety** - `DEFENDER_TOOLING_MARKERS` prevents killing own pipeline/dashboard/lab
-- **Vault PIN** - `victim_user / 1234`, 8h session, quarantine_only scope, cannot decrypt (ransomware destroyed original)
-- **Blockchain audit** - Ganache smart contract with local SQLite fallback (works without Ganache), clearly labeled mode
+- **Vault PIN** - `victim_user / 1234` (env-configurable), 8h session, quarantine_only scope, rate-limited after 5 failures, cannot decrypt (ransomware destroyed original). Unauthenticated access returns 401; a wrong PIN returns 403. Quarantine contents are never listed while locked.
+- **Tamper-evident audit** - the default local ledger is hash-chained (`prev_hash` + `record_hash` per row) and verifies on demand: edit one field with `sqlite3` and `/api/blockchain/status` reports `verified: false` plus the exact broken row. It is **not** a blockchain and is labelled as such; Ganache remains an optional external backend. Appends are refused while the chain is broken.
+
+## 🔬 Cross-Host Intelligence (Measured)
+
+| Channel | Metric | Measured |
+| --- | --- | --- |
+| Exact content hash | Cross-host matches for randomised ciphertext | **0** |
+| Behavioural SimHash | Same strain, other host, different ciphertext | Hamming **0** |
+| Behavioural SimHash | Legitimate bulk backup workload | Hamming **15** |
+
+A content hash cannot identify a shared strain across hosts: every victim's
+ciphertext is randomised (1000/1000 distinct hashes for one file). A
+behavioural fingerprint can. Regenerate with
+`python -m benchmark.exchange_simulation`; read `docs/federated-exchange.md`.
+A behavioural match raises review priority only — it never quarantines alone.
 
 ## 📊 Measured Performance (Honest, Regeneratable)
 
@@ -87,13 +130,13 @@ python -m benchmark.recovery_drill
 
 | Metric | Rules (default) | RF (opt-in) |
 |--------|-----------------|-------------|
-| Attack detection | 42/48 (87.5%) | 48/48 (100%) |
+| Attack detection | 48/48 (100%) | 48/48 (100%) |
 | False quarantines | **0** | 6 (photo/video) |
-| Blind spot | image_blindspot (in-place high-entropy) | none |
+| Former blind spot | image_blindspot — closed by format-integrity (see limitations for its boundary) | none |
 | Recovery | 18/18 in live demo, 45% in full drill (no-baseline losses) | same |
 | Latency | 1-2 file ops to detect, kill at file 2 | same |
 
-**Why 87.5% not 100%?** `image_blindspot` - in-place encryption of jpg/mp4 without rename leaves entropy in normal range. No entropy-only detector can catch it. Published openly as limitation. RF closes it but breaks 0-FQ bar.
+**Why the rule engine now matches the RF.** `image_blindspot` was 0/6 because a full-file rewrite of in-range media left entropy unchanged. It is now caught by *format integrity* — rewriting a `.png` breaks its chunk framing — which is a structural signal, not an entropy one. The rule engine therefore reaches 48/48 **without** the RF's 6 false quarantines. Boundary: encryption that preserves valid container framing is not covered and is not claimed (see `docs/limitations.md`).
 
 ## 🛡️ Quarantine Decryption - Brutally Honest
 
@@ -121,7 +164,7 @@ os.makedirs(QUARANTINE_DIR, exist_ok=True)  # in install.py + lab.py
 
 ```bash
 pip install -r requirements-ci.txt
-python -m unittest discover -s tests  # 126 tests, 0 fail
+python -m unittest discover -s tests  # 191 tests, 0 fail (2 skipped: optional PyTorch)
 ```
 
 ## 📚 Docs
@@ -131,6 +174,7 @@ python -m unittest discover -s tests  # 126 tests, 0 fail
 - `docs/benchmark-report.md` - Auto-generated, regeneratable
 - `docs/recovery-drill-report.md` - RTO and recovery rate
 - `docs/federated-exchange.md` - Cross-node memory simulation
+- `docs/audit/FINAL-READINESS-AUDIT.md` - Release-readiness audit (end-to-end, evasion battery, verdict)
 
 ## 🎓 For Examiners (200 Marks Checklist)
 

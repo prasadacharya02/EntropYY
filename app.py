@@ -33,7 +33,7 @@ def _api_error(message="dashboard service unavailable", status=500):
     return jsonify({"error": message, "status": status}), status
 
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, async_mode="threading")  # same-origin only
 bc       = BlockchainConnector()
 
 
@@ -70,9 +70,9 @@ def platform():
     status = bc.get_status()
     return jsonify({
         "product": "ENTROPY",
-        "tagline": "Entropy fingerprinting with an auditable response ledger",
+        "tagline": "Multi-signal file-behaviour risk with a local tamper-evident audit ledger",
         "edition": "Command Platform",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "dry_run": bool(config.DRY_RUN),
         "watch_folders": config.WATCH_FOLDERS,
         "ledger_mode": status.get("mode"),
@@ -85,35 +85,61 @@ PIPELINE_STALE_SECONDS = 8.0
 
 
 def pipeline_status() -> dict:
+    hb = None
     try:
         db = get_db()
-        hb = read_pipeline_heartbeat(db)
-        db.close()
+        try:
+            hb = read_pipeline_heartbeat(db)
+        finally:
+            db.close()
     except Exception:
         log.exception("Pipeline status read failed")
-        hb = None
+
     victim = os.path.abspath(config.VICTIM_USER_FILES)
     if not hb:
         return {
-            "online": True, "age_seconds": 0.0, "watch_folders": config.WATCH_FOLDERS,
-            "watching_victim": True, "dry_run": False, "engine": "dqn",
-            "stats": {}, "victim_folder": victim,
+            "online": False, "age_seconds": None, "pid": None,
+            "watch_folders": [], "watching_victim": False,
+            "dry_run": None, "engine": None, "stats": {},
+            "victim_folder": victim, "reason": "no pipeline heartbeat",
         }
+
     age = max(0.0, time.time() - float(hb["heartbeat"]))
-    folders = [os.path.abspath(f) for f in hb["watch_folders"]]
+    folders = [os.path.abspath(f) for f in hb.get("watch_folders", [])]
     watching_victim = any(
         victim == f or victim.startswith(f + os.sep) for f in folders
     )
+    pid = hb.get("pid")
+    pid_alive = False
+    try:
+        if pid and int(pid) > 0:
+            os.kill(int(pid), 0)
+            pid_alive = True
+    except PermissionError:
+        # EPERM means the PID exists but this process lacks signal rights.
+        pid_alive = True
+    except (OSError, TypeError, ValueError):
+        pid_alive = False
+    online = age <= PIPELINE_STALE_SECONDS and pid_alive
+    reasons = []
+    if age > PIPELINE_STALE_SECONDS:
+        reasons.append("stale heartbeat")
+    if not pid_alive:
+        reasons.append("pipeline PID is not running")
+    if not watching_victim:
+        reasons.append("victim folder is not in the watch set")
     return {
-        "online": True,
+        "online": online,
         "age_seconds": round(age, 1),
-        "pid": hb.get("pid") if hb else 1024,
+        "pid": pid,
+        "pid_alive": pid_alive,
         "watch_folders": folders,
         "watching_victim": watching_victim,
-        "dry_run": False,
-        "engine": "dqn",
-        "stats": hb.get("stats") if hb else {},
+        "dry_run": bool(hb.get("dry_run")),
+        "engine": hb.get("engine"),
+        "stats": hb.get("stats") or {},
         "victim_folder": victim,
+        "reason": "; ".join(reasons) if reasons else None,
     }
 
 
@@ -124,157 +150,69 @@ def pipeline():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "service": "dashboard"})
+    pipeline = pipeline_status()
+    return jsonify({"status": "ok", "service": "dashboard",
+                    "pipeline_online": pipeline["online"],
+                    "pipeline_reason": pipeline["reason"]})
+
+
+def _physical_quarantine_count() -> int:
+    q_dir = config.QUARANTINE_DIR
+    if not os.path.isdir(q_dir):
+        return 0
+    return sum(
+        1 for name in os.listdir(q_dir)
+        if not name.endswith((".meta.json", ".tmp"))
+        and os.path.isfile(os.path.join(q_dir, name))
+    )
+
+
+def _stats_payload() -> dict:
+    db = get_db()
+    try:
+        row = db.execute("""
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN action >= 1 THEN 1 ELSE 0 END),0) AS threats,
+                   COALESCE(SUM(CASE WHEN response_termination='TERMINATED' THEN 1 ELSE 0 END),0) AS terminated,
+                   COALESCE(SUM(CASE WHEN response_quarantine='QUARANTINED' THEN 1 ELSE 0 END),0) AS quarantined_events,
+                   COALESCE(SUM(CASE WHEN restore_result='RESTORED' THEN 1 ELSE 0 END),0) AS recovered,
+                   AVG(entropy) AS avg_entropy,
+                   MAX(entropy) AS max_entropy,
+                   MAX(risk_score) AS max_risk
+            FROM events
+        """).fetchone()
+    finally:
+        db.close()
+    return {
+        "total": int(row["total"] or 0),
+        "threats": int(row["threats"] or 0),
+        "terminated": int(row["terminated"] or 0),
+        "quarantined": _physical_quarantine_count(),
+        "quarantined_events": int(row["quarantined_events"] or 0),
+        "recovery": int(row["recovered"] or 0),
+        "avg_entropy": round(float(row["avg_entropy"]), 2) if row["avg_entropy"] is not None else None,
+        "max_entropy": round(float(row["max_entropy"]), 2) if row["max_entropy"] is not None else None,
+        "max_risk": round(float(row["max_risk"]), 4) if row["max_risk"] is not None else None,
+        "blockchain_tx": bc.get_event_count(),
+    }
 
 
 @app.route("/api/stats")
 def stats():
     try:
-        db  = get_db()
-        row = db.execute("""
-            SELECT
-                COUNT(*)                    AS total,
-                SUM(CASE WHEN action >= 1
-                    THEN 1 ELSE 0 END)      AS threats,
-                SUM(CASE WHEN action >= 2
-                    THEN 1 ELSE 0 END)      AS terminated,
-                SUM(CASE WHEN restore_result IS NOT NULL
-                    THEN 1 ELSE 0 END)      AS recovery,
-                ROUND(AVG(entropy), 2)      AS avg_entropy,
-                ROUND(MAX(entropy), 2)      AS max_entropy
-            FROM events
-        """).fetchone()
-        db.close()
-
-        # Count physical files in quarantine_storage (excluding .meta.json) for 100% exact match with :5001
-        q_dir = config.QUARANTINE_DIR
-        physical_q_count = 0
-        if os.path.exists(q_dir):
-            physical_q_count = len([
-                f for f in os.listdir(q_dir)
-                if not f.endswith(".meta.json") and not f.endswith(".tmp") and os.path.isfile(os.path.join(q_dir, f))
-            ])
-
-        bc_count = bc.get_event_count()
-
-        return jsonify({
-            "total"        : row["total"]       or physical_q_count,
-            "threats"      : row["threats"]     or physical_q_count,
-            "terminated"   : row["terminated"]  or physical_q_count,
-            "quarantined"  : physical_q_count,  # Synchronized directly with physical storage
-            "recovery"     : physical_q_count,  # Synchronized with recovered clean files
-            "avg_entropy"  : row["avg_entropy"] or 7.95,
-            "max_entropy"  : row["max_entropy"] or 7.95,
-            "blockchain_tx": bc_count
-        })
+        return jsonify(_stats_payload())
     except Exception:
         log.exception("Stats API failed")
         return _api_error()
 
 
 @app.route("/api/telemetry", methods=["POST"])
-def ingest_telemetry():
-    """Intercepts Attack, Removes Ciphertext, Quarantines Evidence, and Restores Clean Original File."""
-    data = request.json or {}
-    filename = data.get("filename", "sample.WNCRY")
-    family = data.get("family", "wannacry")
-    entropy = float(data.get("entropy", 7.95))
-    action = int(data.get("action", 3))
-    pid = int(data.get("pid", 25576))
-    process_name = data.get("process_name", f"ransomware_{family}.exe")
-
-    lock_exts = (".wncry", ".wncryt", ".ryk", ".maze", ".revil", ".lockbit", ".akira", ".clop", ".qilin", ".abcd")
-
-    clean_name = filename
-    enc_filename = filename
-    for ext in lock_exts:
-        if filename.lower().endswith(ext):
-            clean_name = filename[:-len(ext)]
-            break
-    else:
-        enc_filename = f"{filename}.{family}"
-
-    user_files_dir = config.VICTIM_USER_FILES
-    found_folder = None
-
-    for root_dir, _, files in os.walk(user_files_dir):
-        for f in files:
-            if f.lower() == enc_filename.lower() or f.lower() == filename.lower():
-                found_folder = root_dir
-                try:
-                    os.remove(os.path.join(root_dir, f))
-                except Exception:
-                    pass
-                break
-        if found_folder:
-            break
-
-    if not found_folder:
-        found_folder = os.path.join(user_files_dir, "Documents")
-
-    os.makedirs(found_folder, exist_ok=True)
-
-    # Store encrypted payload in Quarantine Vault
-    q_target = os.path.join(config.QUARANTINE_DIR, enc_filename)
-    q_meta = q_target + ".meta.json"
-
-    with open(q_target, "w", encoding="utf-8") as f:
-        f.write("ENTROPY_ISOLATED_RANSOMWARE_CIPHERTEXT")
-
-    with open(q_meta, "w", encoding="utf-8") as f:
-        json.dump({
-            "original_name": clean_name,
-            "original_path": os.path.join(found_folder, clean_name),
-            "quarantine_time": datetime.now().isoformat(),
-            "entropy": entropy,
-            "fingerprint": "a3b9f8d1e2c4567890abcdef12345678",
-            "terminated_process": {"pid": pid, "name": process_name, "terminated": True}
-        }, f, indent=2)
-
-    # Restore clean original file into user folder
-    backup_path = os.path.join(config.BACKUP_DIR, clean_name)
-    restored_target = os.path.join(found_folder, clean_name)
-
-    if os.path.exists(backup_path):
-        try:
-            shutil.copy2(backup_path, restored_target)
-        except Exception:
-            pass
-    else:
-        with open(restored_target, "w", encoding="utf-8") as f:
-            f.write(f"Clean restored content for {clean_name}")
-
-    try:
-        db = get_db()
-        db.execute("""
-            INSERT INTO events (file_path, entropy, entropy_delta, action, process_name, pid, timestamp, status, outcome, engine, confidence, explanation, restore_result)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)
-        """, (
-            restored_target,
-            entropy,
-            2.5,
-            action,
-            process_name,
-            pid,
-            "QUARANTINED",
-            "TERMINATED_AND_QUARANTINED",
-            "dqn",
-            100.0,
-            f"Decision: TERMINATE + QUARANTINE | Threat score: 100/100 | High Entropy ({entropy:.2f})",
-            "RESTORED_FROM_BACKUP"
-        ))
-        db.commit()
-
-        row_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-        row = db.execute("SELECT * FROM events WHERE id = ?", (row_id,)).fetchone()
-        db.close()
-
-        if row:
-            socketio.emit("new_event", dict(row))
-    except Exception as exc:
-        log.exception("Telemetry DB logging error")
-
-    return jsonify({"status": "success", "quarantined": enc_filename, "restored": clean_name})
+def reject_telemetry():
+    """Reject the retired attacker-to-dashboard synthetic telemetry path."""
+    return jsonify({
+        "error": "telemetry injection was removed; events are sourced from the monitored filesystem",
+        "source": "monitoring.pipeline_runner",
+    }), 410
 
 
 @app.route("/api/events")
@@ -345,7 +283,7 @@ def blockchain_status():
         status = bc.get_status()
         labels = {
             "ganache": "Ganache smart contract",
-            "fallback": "Local SQLite ledger (not a blockchain)",
+            "fallback": "Local SQLite hash-chain ledger (tamper-evident; not a blockchain)",
             "none": "Offline — no ledger",
         }
         mode = status.get("mode", "none")
@@ -355,12 +293,40 @@ def blockchain_status():
             "mode"           : mode,
             "mode_label"     : labels.get(mode, mode),
             "tx_count"       : count,
+            "ledger_integrity": status.get("ledger_integrity"),
+            "is_tamper_evident": status.get("is_tamper_evident", False),
             "address"        : config.CONTRACT_ADDRESS,
             "network"        : config.GANACHE_URL
         })
     except Exception:
         log.exception("Blockchain status API failed")
         return _api_error("blockchain status unavailable")
+
+
+@app.route("/api/intel/status")
+def intelligence_status():
+    """Expose actual local intelligence-registry contents and scope."""
+    if not config.EXCHANGE_ENABLED:
+        return jsonify({"enabled": False, "mode": "disabled",
+                        "scope": "no exchange is configured"})
+    registry = None
+    try:
+        from blockchain.behavioral_exchange import BehavioralIntelExchange
+        from blockchain.fingerprint_exchange import get_exchange
+        registry = BehavioralIntelExchange()
+        return jsonify({
+            "enabled": True,
+            "scope": "local shared SQLite registry; not network-replicated",
+            "behavioral": registry.stats(),
+            "exact_content_hashes": get_exchange().count(),
+            "behavioral_match_is_advisory": True,
+        })
+    except Exception:
+        log.exception("Intelligence registry status failed")
+        return _api_error("intelligence status unavailable")
+    finally:
+        if registry is not None:
+            registry.close()
 
 
 @app.route("/api/quarantine")
@@ -402,15 +368,7 @@ def quarantine_files():
 @app.route("/api/live")
 def live_stats():
     try:
-        q_dir = config.QUARANTINE_DIR
-        physical_q_count = len([f for f in os.listdir(q_dir) if not f.endswith(".meta.json") and os.path.isfile(os.path.join(q_dir, f))]) if os.path.exists(q_dir) else 0
-
-        return jsonify({
-            "total"      : physical_q_count,
-            "threats"    : physical_q_count,
-            "terminated" : physical_q_count,
-            "quarantined": physical_q_count,
-        })
+        return jsonify(_stats_payload())
     except Exception:
         log.exception("Live stats API failed")
         return _api_error("live statistics unavailable")
@@ -497,16 +455,13 @@ def push_updates():
                         last_id = cur_max
                 db.close()
 
-                # Calculate physical quarantine count
-                q_dir = config.QUARANTINE_DIR
-                q_cnt = len([f for f in os.listdir(q_dir) if not f.endswith(".meta.json") and os.path.isfile(os.path.join(q_dir, f))]) if os.path.exists(q_dir) else 0
-
-                socketio.emit("live_update", {
-                    "total"   : q_cnt,
-                    "threats" : q_cnt,
-                    "time"    : datetime.now().strftime("%H:%M:%S"),
-                    "pipeline": pipeline_status(),
-                })
+                try:
+                    live = _stats_payload()
+                    live["time"] = datetime.now().strftime("%H:%M:%S")
+                    live["pipeline"] = pipeline_status()
+                    socketio.emit("live_update", live)
+                except Exception:
+                    log.exception("Live counters unavailable; update not emitted")
         except Exception:
             log.exception("Live update push failed")
         time.sleep(0.4)
@@ -525,21 +480,20 @@ def dqn_last_decision():
         if not row:
             return jsonify({
                 "decision": "STANDBY",
-                "confidence": 0,
-                "engine": "none",
+                "risk_score": None,
+                "engine": None,
                 "explanation": "",
                 "factors": []
             })
 
         keys = row.keys()
-        entropy = row["entropy"] or 0
-        delta   = row["entropy_delta"] or 0
+        entropy = row["entropy"]
+        delta   = row["entropy_delta"]
         action  = row["action"] or 0
-        engine  = row["engine"] if "engine" in keys and row["engine"] else "dqn"
+        engine  = row["engine"] if "engine" in keys else None
         explanation = row["explanation"] if "explanation" in keys else ""
-        confidence = row["confidence"] if "confidence" in keys and row["confidence"] is not None else 100.0
-        if isinstance(confidence, float) and confidence <= 1:
-            confidence = round(confidence * 100, 1)
+        risk_score = row["risk_score"] if "risk_score" in keys else None
+        risk_percent = round(float(risk_score) * 100, 1) if risk_score is not None else None
 
         decisions = {
             0: "IGNORE",
@@ -551,18 +505,21 @@ def dqn_last_decision():
 
         factors = [
             {"name": "Engine", "value": engine, "pass": True},
-            {"name": "Requested action", "value": decisions.get(action, "TERMINATE + QUARANTINE"), "pass": action >= 1},
-            {"name": "Outcome", "value": outcome or "QUARANTINED", "pass": True},
-            {"name": "Entropy", "value": f"{entropy:.2f}", "pass": entropy >= config.ENTROPY_THRESHOLD},
-            {"name": "Entropy delta", "value": f"{abs(delta):.2f}", "pass": abs(delta) >= config.ENTROPY_DELTA_THRESHOLD},
+            {"name": "Requested action", "value": decisions.get(action, "UNKNOWN"), "pass": action >= 1},
+            {"name": "Outcome", "value": outcome or "not recorded", "pass": bool(outcome)},
+            {"name": "Entropy", "value": f"{entropy:.2f}" if entropy is not None else "not measured", "pass": entropy is not None and entropy >= config.ENTROPY_THRESHOLD},
+            {"name": "Entropy delta", "value": f"{abs(delta):.2f}" if delta is not None else "not measured", "pass": delta is not None and abs(delta) >= config.ENTROPY_DELTA_THRESHOLD},
         ]
+        if risk_score is not None:
+            factors.append({"name": "Uncalibrated risk index", "value": f"{risk_percent:.1f}/100", "pass": risk_score >= 0.45})
         if explanation:
-            factors.append({"name": "Explanation", "value": explanation[:80], "pass": True})
+            factors.append({"name": "Explanation", "value": explanation[:120], "pass": True})
 
         return jsonify({
-            "decision": decisions.get(action, "TERMINATE + QUARANTINE"),
-            "confidence": confidence,
+            "decision": decisions.get(action, "UNKNOWN"),
+            "risk_score": risk_percent,
             "engine": engine,
+            "outcome": outcome,
             "explanation": explanation,
             "factors": factors
         })
@@ -575,27 +532,23 @@ def dqn_last_decision():
 def flagged_processes():
     try:
         db = get_db()
-        rows = db.execute("""
-            SELECT
-                COALESCE(process_name, 'unknown') AS name,
-                pid,
-                COUNT(*) AS hits,
-                MAX(action) AS max_action,
-                MAX(entropy) AS max_ent
-            FROM events
-            WHERE action >= 1
-            GROUP BY process_name, pid
-            ORDER BY hits DESC
-            LIMIT 10
-        """).fetchall()
-        db.close()
-
+        try:
+            rows = db.execute("""
+                SELECT process_name AS name, pid, COUNT(*) AS hits,
+                       MAX(action) AS max_action, MAX(entropy) AS max_ent,
+                       MAX(CASE WHEN response_termination='TERMINATED' THEN 1 ELSE 0 END) AS was_terminated
+                FROM events
+                WHERE action >= 1 AND pid IS NOT NULL AND process_name IS NOT NULL
+                GROUP BY process_name, pid
+                ORDER BY hits DESC
+                LIMIT 10
+            """).fetchall()
+        finally:
+            db.close()
         return jsonify([{
-            "name": r["name"] or "unknown",
-            "pid": r["pid"] or 25576,
-            "hits": r["hits"],
-            "status": "killed" if r["max_action"] >= 2 else "watch",
-            "entropy": r["max_ent"] or 7.95
+            "name": r["name"], "pid": r["pid"], "hits": r["hits"],
+            "status": "killed" if r["was_terminated"] else "observed",
+            "entropy": r["max_ent"],
         } for r in rows])
     except Exception:
         log.exception("Process summary API failed")
@@ -613,20 +566,27 @@ def demo_trigger():
 @app.route("/api/threat-level")
 def threat_level():
     try:
-        q_dir = config.QUARANTINE_DIR
-        cnt = len([f for f in os.listdir(q_dir) if not f.endswith(".meta.json")]) if os.path.exists(q_dir) else 0
-
-        if cnt == 0:
+        db = get_db()
+        try:
+            row = db.execute("""
+                SELECT COUNT(*) AS count, MAX(risk_score) AS max_risk,
+                       SUM(CASE WHEN action >= 3 THEN 1 ELSE 0 END) AS contained
+                FROM events WHERE action >= 1
+                  AND timestamp >= datetime('now', '-10 minutes')
+            """).fetchone()
+        finally:
+            db.close()
+        count = int(row["count"] or 0)
+        risk = float(row["max_risk"] or 0.0)
+        if count == 0:
             level, label = 0, "MINIMAL"
         else:
-            level, label = 95, "CRITICAL"
-
-        return jsonify({
-            "level": level,
-            "label": label,
-            "recent_threats": cnt,
-            "recent_critical": cnt
-        })
+            level = round(100 * risk)
+            label = "CRITICAL" if risk >= 0.85 else "ELEVATED" if risk >= 0.55 else "GUARDED"
+        return jsonify({"level": level, "label": label,
+                        "recent_threats": count,
+                        "recent_critical": int(row["contained"] or 0),
+                        "risk_method": "uncalibrated multi-signal evidence index"})
     except Exception:
         log.exception("Threat level API failed")
         return _api_error("threat level unavailable")

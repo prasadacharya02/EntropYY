@@ -35,6 +35,7 @@ from monitoring.watchdog_monitor import FileMonitor
 from monitoring.event_deduplicator import EventDeduplicator
 from monitoring.defense_guard import collect_threat_flags
 from entropy.entropy_calculator  import EntropyAnalyzer, visualize_entropy
+from detection.structure import inspect_structure
 
 # ── Setup Logging ─────────────────────────────────────────
 logging.basicConfig(
@@ -338,9 +339,22 @@ class EventPipeline:
             self.stats['total_skipped'] += 1
             return
 
-        enriched_event = self._with_threat_flags(
-            self._merge_event(event, entropy_result)
-        )
+        enriched_event = self._merge_event(event, entropy_result)
+        try:
+            structure = inspect_structure(
+                file_path, original_path=event.get('original_path')
+            )
+            enriched_event['structure'] = structure
+            enriched_event['structure_anomaly'] = bool(structure.get('anomaly'))
+        except Exception as structure_error:
+            # Structure checking is supplementary; a parser/check failure must
+            # never suppress the underlying file event or entropy analysis.
+            enriched_event['structure'] = {
+                'checked': False, 'valid': None, 'anomaly': False,
+                'evidence': f'check failed: {structure_error.__class__.__name__}',
+            }
+            enriched_event['structure_anomaly'] = False
+        enriched_event = self._with_threat_flags(enriched_event)
         self.analyzed_store.add(enriched_event)
         self.stats['total_analyzed'] += 1
 
@@ -372,6 +386,7 @@ class EventPipeline:
             'entropy_delta'   : None,
             'entropy_score'   : None,
             'file_hash'       : None,
+            'content_hash'    : None,
             'threat_score'    : 0.0,
             'is_suspicious'   : event.get('ext_changed', False),
             'reason'          : reason,
@@ -455,6 +470,9 @@ class EventPipeline:
             'entropy_delta'    : entropy_result['entropy_delta'],
             'prev_entropy'     : entropy_result['prev_entropy'],
             'file_hash'        : entropy_result['file_hash'],
+            # Exact full-file digest (None above the configured size limit).
+            # Only this value may be shared as exact threat intelligence.
+            'content_hash'     : entropy_result.get('content_hash'),
 
             # ── Normal Range ───────────────────────────────
             'normal_range_min' : entropy_result['normal_range_min'],

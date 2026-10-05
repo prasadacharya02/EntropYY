@@ -175,7 +175,9 @@ def collect_threat_flags(event: dict,
     # fingerprint as a confirmed threat? A single node's sighting is
     # corroboration only; >= EXCHANGE_CONFIRM_THRESHOLD *independent*
     # sources confirm the fingerprint as a known threat.
-    fingerprint = event.get("file_hash") or ""
+    # Exact-match intel uses the optional full-file digest only. The sampled
+    # entropy digest is a different value and must never be looked up here.
+    fingerprint = event.get("content_hash") or ""
     if fingerprint:
         # An injected exchange is an explicit opt-in; the canonical
         # store is gated by config.EXCHANGE_ENABLED.

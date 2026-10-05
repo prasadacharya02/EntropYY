@@ -4,25 +4,28 @@ This project is a **controlled teaching lab with industry-level engineering**, n
 
 ## Detection - What Works & What Doesn't
 
-- **Works**: Shannon entropy + speed/extension + campaign escalation catches slow realistic attacks at file 2. Verified live: WannaCry killed at file 2/18, 18/18 restored.
+- **Works**: Shannon entropy + format-integrity + campaign escalation. Measured live (2026-10-04 audit): first incident row 206 ms after launch, attacker process killed 1.0-1.4 s after launch, 1 of 43 files touched, that file quarantined and restored, 0 encrypted. Benchmark: 48/48 attack runs, 0/21 false positives, 0 false quarantines.
 - **Limitation**: Process attribution is verified only when process has file open. Other guesses stored but cannot terminate. Best-effort, can be dodged by sophisticated malware.
 - **Limitation**: Ransom-note signal is signature-based (filenames, phrase list). Unknown note wording with no matching filename relies on entropy/speed signals.
 - **Limitation**: Defense-tamper signal watches backup_storage/ and quarantine_storage/ for deletions. Backup store's own housekeeping (manifest rewrites, temp files) exempted by name, but version evictions beyond ENTROPY_BACKUP_MAX_VERSIONS (default 10) can look like tampering - raises alert (safe direction, not missed attack).
-- **Known Blind Spot**: `image_blindspot` - in-place encryption of already-high-entropy media (jpg 7.0-7.8, mp4 7.0-7.9) without rename leaves entropy within normal range. Encrypted payload indistinguishable from native compressed content by entropy alone. Rule engine 0/6, RF 6/6 but with 6 false quarantines. Published openly.
+- **Former blind spot, now closed structurally (with a stated boundary)**: `image_blindspot` (in-place encryption of high-entropy media, no rename) used to score 0/6. It is now 6/6 because a full-file rewrite of a `.png` breaks its chunk framing, and the format-integrity signal fires regardless of entropy. **The boundary:** an attacker who encrypts payload bytes while preserving valid container framing would still satisfy the format check. That variant is **not** in the battery and must not be reported as detected. Format-framed files only (.png/.jpg/.pdf/.zip/.docx/.xlsx/.mp4 and friends); unknown extensions are reported as `unchecked`, never as clean.
 
 ## AI - Honest Scope
 
 - DQN weights optional. Without ai/dqn_weights.pth rule engine decides. Dashboard fields engine/confidence/explanation come from persisted events, not fabricated scores. Torch optional, fallback to rules.
 - Training data synthetic, versioned schema_version 1, held-out split.
+- **Risk index is uncalibrated.** The multi-signal score is a weighted noisy-OR over evidence families; it is an interpretable index, NOT a probability. Every surface that shows it is labelled `UNCALIBRATED`. A calibrated probability would need labelled real-world telemetry we do not have.
 - Random Forest second classifier (ai/rf_weights.json, python -m ai.train_rf) trained on seeded synthetic data (11 features), opt-in engine ENTROPY_AI_ENGINE=rf. Measured: 48/48 attacks but 6 FQ on media, so NOT default. Rule engine keeps 0-FQ bar. SHAP per-incident, fallback to global importances if SHAP missing. Synthetic data does not predict real-world prevalence.
 - Hard-confirmation signals (ransom note, defense tamper, exchange-confirmed fingerprint) applied BEFORE any learned engine, so no model can downgrade confirmed incident.
+- **Cross-host correlation is behavioural, not content-hash based.** Measured: content hashes never match across hosts for randomised ciphertext (0 cross-host matches; 1000/1000 distinct for one file), while the behavioural SimHash puts the same strain on another host at Hamming distance 0 and a legitimate bulk backup workload at 15. A behavioural match raises review priority only; it never quarantines alone. See `docs/federated-exchange.md`.
+- **Attribution of a file write to a process is best-effort.** User-space `psutil` polling is a poll, not an event; a short-lived writer can close its handle before it is observed. The response layer refuses to terminate on unverified attribution, and `attribution_source` is now recorded per event. eBPF or a kernel minifilter would fix this properly; both are out of scope (non-portable, root/kernel-headers required, not demonstrable on a laptop).
 
 ## Blockchain - Honest
 
 - Modes explicit: ganache, fallback (local SQLite), none. Default fallback=true for demo (works without Ganache).
-- Fallback is NOT immutable chain - clearly labeled mode_label.
+- The local fallback is a **hash-chained, tamper-evident** SQLite ledger (`prev_hash` + `record_hash` per row), labelled `mode_label: "Local SQLite hash-chain ledger (tamper-evident; not a blockchain)"`. It detects edits and deletions on verification, and `add()` refuses to append to a broken chain. It is **not** tamper-proof against an administrator who rewrites the whole database and recomputes every hash — that needs an external anchor, which this build does not configure. Demonstration: edit one field with `sqlite3`, then `GET /api/blockchain/status` reports `verified: false` and `record hash mismatch at ledger row N`.
 - logThreat is onlyOwner. Set ENTROPY_WALLET_ADDRESS to deployer.
-- Federated exchange simulated with one shared SQLite store, several simulated nodes open - not a network. Fingerprint match corroborating evidence, can only confirm threat already at quarantine-threshold, never standalone detector. Single node's sighting only corroborates (+25 score) never auto-quarantine - independent-node consensus threshold defends against poisoned node.
+- Cross-host registry is one shared SQLite store with several simulated node identities - not a network, no replication, no consensus protocol. A behavioural match is corroborating evidence that can raise review priority; it never quarantines by itself and never replaces the deterministic campaign evidence. Independent-node threshold (default 2 distinct IDs) still applies, and corroboration counts the near-neighbour cluster rather than only bit-identical signatures.
 
 ## Simulator - Safety
 
@@ -60,6 +63,39 @@ This project is a **controlled teaching lab with industry-level engineering**, n
 - Install-time quarantine folder creation per spec
 - Requirements fixed (was ResolutionImpossible due to shap 0.51 + numpy 1.26.4 conflict)
 
+## Adversarial Battery - Measured (2026-10-04 audit)
+
+Every technique was executed as a real child process against the live pipeline:
+
+| Technique | Files | Detected | Note |
+|---|---|---|---|
+| Fast random overwrite burst | 20 | YES (20/20) | entropy delta + format + campaign |
+| Extension camouflage (`.txt` kept) | 10 | YES (10/10) | format integrity + delta, not the extension |
+| Low-and-slow random overwrite | 4 | YES (4/4) | entropy delta per file |
+| **XOR / entropy-preserving substitution** | 10 | **NO** | content destroyed, entropy unchanged, unknown format -> nothing fires |
+| **XOR low-and-slow** | 3 | **NO** | same, below every rate threshold |
+| **Encryption outside the watched folders** | 5 | **NO** | inherent to watch-scope; nothing is collected |
+| 200 legitimate files in one burst | 200 | correctly NOT flagged | velocity alone is not evidence (fixed this audit) |
+
+The XOR class is the same limit the entropy-sharing literature reports: an attacker who preserves
+the byte distribution defeats entropy analysis, and a `.txt` file has no container to validate.
+Do not claim these are caught.
+
+## Control Plane - Trust Model
+
+`/api/launch`, `/api/stop`, `/api/pause`, `/api/resume`, `/api/speed`, `/api/reset` accept exactly:
+loopback peers, a valid `Authorization: Bearer <token>` (`ENTROPY_CONTROL_TOKEN`, otherwise a
+per-session token generated at startup), or a same-site browser request whose Origin/Referer host
+matches the `Host`/`X-Forwarded-Host` it was served on. Everything else is 403 - verified on real
+non-loopback sockets. Because the token is embedded in the console page, **having the page is
+equivalent to having control**; put your own authentication in front if you ever expose it.
+
+## Measured Overhead (2026-10-04 audit)
+
+Pipeline process: **1.8 % CPU / 129 MB RSS idle**; **28 % mean CPU (110 % peak) / 131 MB RSS at
+~10 files/s**, 43.7 MB written for 200 events (each event writes a forensic report). The 1 s
+polling loop is the idle cost.
+
 ## For Examiners
 
-This is working system with 126 tests pass, deterministic benchmark, live demo verified. Not PowerPoint. Show kill at file 2, 18/18 restored, vault evidence. Don't claim 100% detection, blockchain immutable, or quarantine decryption.
+This is working system with 191 tests pass, deterministic benchmark, live demo verified. Not PowerPoint. Show the kill, 18/18 restored, vault evidence, the ledger tamper demonstration, and the measured behavioural-vs-content-hash contrast. Don't claim zero files lost, network-replicated intelligence, a blockchain, quarantine decryption, entropy-preserving detection, or A/B/C baseline numbers - and remember velocity-only activity is deliberately not an alert.

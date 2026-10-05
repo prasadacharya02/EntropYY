@@ -120,7 +120,8 @@ def calculate_file_entropy(file_path: str,
         'file_size'       : 0,
         'bytes_read'      : 0,
         'file_extension'  : '',
-        'file_hash'       : '',
+        'file_hash'       : '',  # SHA-256 of entropy sample; not a full-file digest
+        'content_sha256'  : None,
         'is_readable'     : False,
         'error'           : None,
     }
@@ -134,9 +135,20 @@ def calculate_file_entropy(file_path: str,
         # Get file size
         result['file_size'] = os.path.getsize(file_path)
 
-        # Read the file bytes
+        # Entropy is measured from the configured sample. When the file is
+        # within the explicit size limit, continue the same read stream into a
+        # full SHA-256 digest for exact threat-intel matching.
         with open(file_path, 'rb') as f:
             data = f.read(sample_size)
+            full_hasher = None
+            if (config.CONTENT_HASH_MAX_BYTES > 0
+                    and result['file_size'] <= config.CONTENT_HASH_MAX_BYTES):
+                full_hasher = hashlib.sha256()
+                full_hasher.update(data)
+                while chunk := f.read(1024 * 1024):
+                    full_hasher.update(chunk)
+            if full_hasher is not None:
+                result['content_sha256'] = full_hasher.hexdigest()
 
         result['bytes_read'] = len(data)
         result['is_readable'] = True
@@ -158,8 +170,9 @@ def calculate_file_entropy(file_path: str,
             result['entropy_middle'] = calculate_entropy(data[third:2*third])
             result['entropy_end']    = calculate_entropy(data[2*third:])
 
-        # Calculate file hash (SHA-256)
-        # Used as fingerprint for blockchain
+        # Sampled-content digest. Kept for existing callers; it hashes only the
+        # bytes that entropy was measured from, so it is NOT a full-file
+        # identity and must never be published as exact threat intel.
         sha256 = hashlib.sha256()
         sha256.update(data)
         result['file_hash'] = sha256.hexdigest()
@@ -327,6 +340,7 @@ class EntropyAnalyzer:
             'file_extension'  : entropy_data['file_extension'],
             'file_size'       : entropy_data['file_size'],
             'file_hash'       : entropy_data.get('file_hash', ''),
+            'content_hash'    : entropy_data.get('content_sha256'),
 
             # ── Entropy Values ─────────────────────────────
             'entropy_overall' : entropy_data.get('entropy_overall', 0.0),

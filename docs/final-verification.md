@@ -73,9 +73,9 @@ Blockchain: fallback mode, tx_count=4
 ## Tests
 
 ```
-126 tests OK (skipped=2 optional)
+174 tests OK (skipped=2 optional)
 py_compile OK all files
-benchmark: 42/48 detection (87.5%) rules, 0 false quarantines, slow_crawler 6/6, polymorphic 6/6
+benchmark: 48/48 detection (100%) rules, 0 false quarantines, image_blindspot now 6/6 via format integrity
 recovery drill: 45.1% (honest, no-baseline losses)
 ```
 

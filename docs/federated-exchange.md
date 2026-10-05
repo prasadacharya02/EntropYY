@@ -1,86 +1,107 @@
-# Federated threat-fingerprint exchange
+# Cross-host threat intelligence in this project
 
-The network effect, made concrete: when one node contains a file as a
-confirmed threat, every other node can ask *"have I seen this
-fingerprint before?"* and answer *yes* — with provenance (who saw it,
-how many times) — instead of re-learning the same threat from scratch.
+**Status: implemented and measured. The interesting result is a negative one.**
 
-This is the layer the pitch claims the blockchain exists to serve. It
-is now **built and measured**, not just asserted.
+## The finding this layer is built on
 
-## What it is
+A content hash of ransomware ciphertext **cannot** identify a shared strain
+across hosts. Each victim's ciphertext is randomised (fresh IV/nonce per file),
+so the bytes — and therefore the SHA-256 — differ on every host and every run.
+We measured exactly that in our own repository before building anything:
 
-- **Registry** — `blockchain/fingerprint_exchange.py`. Maps a
-  SHA-256 content fingerprint to `sightings` (writes), `sources`
-  (distinct node ids), first-seen time, and the first evidence string.
-  In this lab the "network" is one SQLite file
-  (`blockchain/exchange.db`) opened by several simulated nodes; in a
-  deployment the same schema and API *is* the network.
-- **Write path** — `execute_response` shares a fingerprint only for
-  **confirmed threats** (files actually quarantined), and only when it
-  holds the file's real content hash. A path hash, an alert (a
-  suspicion, not a fact), or an already-deleted file is never published.
-- **Read path** — `collect_threat_flags` (the same function the live
-  pipeline and the benchmark use) looks up the fingerprint on every
-  event that carries a content hash.
+```
+original file sha256:        9dd0f5ea35f5a722
+Host-A ciphertext sha256:    caf473dac34f2205
+Host-B ciphertext sha256:    a2be6e60c5a2fdae
+Host-A run-2 sha256:         eda0ab7bf630248f
+
+distinct hashes over 1000 encryptions of the SAME file: 1000 / 1000
+```
+
+Reproduce: `python -m benchmark.exchange_simulation` (see the
+`exact_hash_channel` block of the artifact in `benchmark/results/`).
+
+So this project runs **two independent channels**, and reports them separately
+because they have different failure modes.
+
+### Channel 1 — exact content hash (kept, with honest scope)
+
+`blockchain/fingerprint_exchange.py` maps a full-file SHA-256 to sightings and
+distinct node IDs. It works for artefacts that are **byte-identical by
+construction** — a ransom note text is the same string on every victim — and it
+is the right tool for that case. It is useless for ciphertext, and the project
+no longer pretends otherwise.
+
+The pipeline publishes to this channel only when all of the following hold:
+
+1. the action was a **real** quarantine (not dry-run, not a simulated success),
+2. the file's **exact** full-file digest was computed
+   (`ENTROPY_CONTENT_HASH_MAX_BYTES`, default 256 MB),
+3. the event is not from inside a defender store.
+
+The sampled entropy digest is a *different value* and is never published as
+exact intel.
+
+### Channel 2 — behavioural fingerprint (the part that generalises)
+
+`fingerprint/behavioral.py` builds a 64-bit SimHash over the **shape** of a
+short operation sequence: event type, extension family, entropy bucket, entropy
+delta bucket, rate bucket, extension-change flag, and format-integrity flag,
+combined as unigrams, bigrams and trigrams. `blockchain/behavioral_exchange.py`
+stores those signatures and answers nearest-neighbour queries by Hamming
+distance.
+
+Measured separation (`python -m benchmark.exchange_simulation`):
+
+| Comparison | Hamming distance | Interpretation |
+| --- | --- | --- |
+| Same strain, **different host, independently randomised ciphertext** | **0** | identified as the same behaviour |
+| Second host encounter (no ransom note) | **6** | inside the 6-bit match radius |
+| Legitimate bulk backup workload | **15** | well outside the radius |
+
+The ransom note is deliberately *not* required: the second-host encounter above
+carries no note and still matches.
 
 ## The confirmation rule (and why it exists)
 
-| Sightings on record | Flag | Effect |
+| Sightings | Flag | Effect |
 | --- | --- | --- |
-| 0 | — | no exchange signal |
-| 1 (single node) | `known_threat` | corroboration only: +25 to the threat score, evidence in the explanation — **never** quarantines alone |
-| ≥ `ENTROPY_EXCHANGE_CONFIRM_THRESHOLD` (default **2** *independent* nodes) | `known_threat_confirmed` | hard confirmation: auto-quarantine, like a ransom note or defense tamper |
+| unknown | none | nothing added |
+| ≥ 1 node (near-neighbour cluster) | `known_threat` | **corroborating**: raises review risk |
+| ≥ `ENTROPY_EXCHANGE_CONFIRM_THRESHOLD` (default 2) **distinct node IDs** | `confirmed` | review priority; see below |
 
-The threshold is the defence against a poisoned or buggy node seeding
-the exchange with a clean file's hash: one node cannot make every other
-node destroy files. Two *independent* nodes must agree.
+Corroboration counts the whole near-neighbour cluster, not only bit-identical
+signatures, because two hosts observing the same behaviour rarely produce
+exactly equal SimHashes. Distinct node IDs are still required, so one noisy or
+malicious node cannot confirm a signature by itself.
 
-## Measured behaviour (multi-node simulation)
+**A behavioural match never quarantines a file on its own.** In
+`DecisionEngine.decide`, a confirmed match can raise an IGNORE to an ALERT
+(review priority). Containment still requires the deterministic evidence in the
+campaign layer. This is deliberate: a fuzzy signature is corroborating context,
+not proof.
 
-`benchmark/exchange_simulation.py` runs several tenants (distinct
-identities, each with its own local entropy history) against one shared
-exchange, driving the **real** decision + response chain (dry-run).
+## What this is not
 
-The test strain: a ransom note plus in-place encryption of a
-deterministic 64 KB payload. The *ambiguous* case: that same payload
-alone — high entropy, unknown extension, **no note, no baseline, no
-local history** — which on its own is only an ALERT (score 40).
+- **Not a network.** The registry is a single SQLite file opened by several
+  simulated node identities. There is no replication, no transport, no
+  Byzantine agreement. `GET /api/intel/status` reports
+  `"scope": "local shared SQLite registry; not network-replicated"`.
+- **Not a calibrated probability.** The risk index is an uncalibrated evidence
+  aggregate and is labelled as such everywhere it is displayed.
+- **Not a substitute for a signature database.** It clusters *behaviour*, not
+  binaries.
+- **Limited by session length.** A single-file, single-event session has no
+  behavioural shape and does not match anything: our cold-start and
+  single-sighting probes measure exactly that (distances of 30+ bits from the
+  strain cluster). Correlation needs a few operations to become distinctive.
 
-| Phase | Tenant | Exchange state | Local score | Decision |
-| --- | --- | --- | --- | --- |
-| Cold start | charlie | empty | 40 | **ALERT** |
-| Seeding | alpha | — | note + 70 | QUARANTINE ×2 (seeds both fingerprints) |
-| Single sighting | delta | 1 source | 40 (+25) | **ALERT** — corroborated, no quarantine |
-| Seeding | bravo | 1 → 2 sources | note + 70 | QUARANTINE ×2 |
-| Warm start | charlie (fresh, no history) | 2 sources | 40 | **QUARANTINE** — `KNOWN THREAT (CONFIRMED BY EXCHANGE)` |
-| Workload | charlie | threat-only store | 0 | IGNORE ×4, **0** new exchange records |
-
-**The headline:** a fresh node with zero local history quarantines a
-file that is locally ambiguous (alert-only) because two independent
-nodes have already contained that exact payload. The exchange adds
-cross-node memory; it never fires on legitimate work.
-
-Run it:
+## Reproducing
 
 ```bash
 python -m benchmark.exchange_simulation
-# → prints the table above + writes benchmark/results/exchange_simulation_<ts>.json
+# writes benchmark/results/exchange_simulation_<timestamp>.json
 ```
 
-Invariants are pinned by `tests/test_exchange_simulation.py`.
-
-## What it is deliberately not
-
-- **Not a standalone detector.** A fingerprint match alone can never
-  quarantine a file that is otherwise clean. Detection still comes from
-  the entropy/behaviour engine; the exchange *confirms* and
-  *corroborates*.
-- **Not the immutability story.** The blockchain log
-  (`blockchain/connector.py`) remains the tamper-evident anchor for a
-  node's *own* incidents. The exchange is the cross-node memory; in a
-  real deployment it would be replicated and anchored to that chain.
-- **Not a network in this lab.** One SQLite file plays the role of the
-  shared store so several simulated nodes can genuinely see each
-  other's writes. The API is written so the store can be swapped for a
-  network backend without touching the decision logic.
+`python -m benchmark` embeds the same metrics in
+`docs/benchmark-report.md` under "Cross-host intelligence".

@@ -103,6 +103,7 @@ class ExchangeResponseIntegrationTests(unittest.TestCase):
     def _event(self, **overrides):
         event = {
             "event_id": "e1",
+            "content_hash": self.file_hash,
             "timestamp": "2026-09-18T00:00:00",
             "event_type": "MODIFIED",
             "file_path": self.file,
@@ -118,26 +119,38 @@ class ExchangeResponseIntegrationTests(unittest.TestCase):
         event.update(overrides)
         return event
 
-    def _run(self, action, event):
+    def _run(self, action, event, *, dry_run=False):
         class _Bc:
             def log_event(self, _e):
                 pass
-        with mock.patch.object(config, "DRY_RUN", True), \
+        vault = os.path.join(self.tmp, "vault")
+        os.makedirs(vault, exist_ok=True)
+        with mock.patch.object(config, "DRY_RUN", dry_run), \
+             mock.patch.object(config, "QUARANTINE_DIR", vault), \
              mock.patch.object(runner, "get_exchange",
                                lambda: self.exchange):
             return runner.execute_response(
                 action, event, _Bc(), None,
-                {"engine": "rules", "confidence": 1.0,
-                 "explanation": "test incident"},
+                {"engine": "rules", "explanation": "test incident"},
+                exchange=self.exchange,
             )
 
-    def test_confirmed_threat_shares_content_hash(self):
-        self._run(config.ACTION_TERMINATE_QUARANTINE, self._event())
+    def test_confirmed_live_quarantine_shares_the_content_hash(self):
+        outcome = self._run(config.ACTION_TERMINATE_QUARANTINE, self._event())
+        self.assertIn("QUARANTINED", outcome)
         rec = self.exchange.lookup(self.file_hash)
         self.assertIsNotNone(rec)
         self.assertEqual(rec["sources"], ["node-test"])
         self.assertEqual(rec["file_extension"], ".pdf")
         self.assertIn("test incident", rec["first_evidence"])
+
+    def test_dry_run_containment_is_not_published_as_intel(self):
+        # A simulated quarantine is not a confirmed sighting; publishing it
+        # would let an attacker (or a bug) seed the exchange with fiction.
+        outcome = self._run(config.ACTION_TERMINATE_QUARANTINE,
+                            self._event(), dry_run=True)
+        self.assertIn("DRY_RUN", outcome)
+        self.assertEqual(self.exchange.count(), 0)
 
     def test_alert_is_not_shared(self):
         self._run(config.ACTION_ALERT, self._event())
@@ -147,8 +160,18 @@ class ExchangeResponseIntegrationTests(unittest.TestCase):
     def test_missing_content_hash_is_not_shared(self):
         # Defense-tamper on an already-deleted file: no content, no
         # fingerprint — a path hash must never be published.
-        event = self._event(file_hash="")
+        event = self._event(file_hash=None)
+        event.pop("content_hash", None)
         self._run(config.ACTION_TERMINATE_QUARANTINE, event)
+        self.assertEqual(self.exchange.count(), 0)
+
+    def test_sampled_digest_is_never_used_as_exact_intel(self):
+        # The entropy sample digest is a different value from the exact
+        # full-file digest and must not enter the exact-match registry.
+        sampled = self._event()
+        sampled["content_hash"] = None
+        self._run(config.ACTION_TERMINATE_QUARANTINE, sampled)
+        self.assertIsNone(self.exchange.lookup(sampled["file_hash"]))
         self.assertEqual(self.exchange.count(), 0)
 
 
